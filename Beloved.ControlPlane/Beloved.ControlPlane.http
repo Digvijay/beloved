@@ -1,0 +1,6 @@
+@Beloved.ControlPlane_HostAddress = http://localhost:5277
+
+GET {{Beloved.ControlPlane_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

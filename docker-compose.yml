@@ -1,0 +1,76 @@
+version: "3.9"
+
+# Beloved — Full Local Stack
+# Single command to bring the entire platform live:
+#   docker-compose up
+#
+# Services:
+#   beloved-api     — Control Plane ASP.NET Core API (port 3000)
+#   oci-registry    — OCI-compliant component vault (port 5001)
+#   ollama          — Local LLM inference server (port 11434)
+
+services:
+
+  # ── OCI Component Registry ────────────────────────────────────────────────
+  oci-registry:
+    image: registry:2
+    container_name: beloved-registry
+    ports:
+      - "5001:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000/v2/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ollama Local LLM ──────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: beloved-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Beloved Control Plane ─────────────────────────────────────────────────
+  beloved-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beloved-api
+    ports:
+      - "3000:3000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:3000
+      - Llm__Provider=Ollama
+      - Llm__BaseUrl=http://ollama:11434
+      - Llm__Model=gpt-oss:120b-cloud
+      - ConnectionStrings__BelovedDb=/data/beloved.db
+    volumes:
+      - api-data:/data
+    depends_on:
+      oci-registry:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/modules"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  registry-data:
+  ollama-data:
+  api-data:

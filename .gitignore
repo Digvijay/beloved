@@ -1,0 +1,55 @@
+# .NET Build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Databases & local state
+*.db
+*.db-shm
+*.db-wal
+.beloved_artifacts/
+output/
+
+# Assembled artifacts & test downloads
+*.zip
+cli-test/
+
+# Local project config (written by `beloved init`)
+beloved.json
+
+# IDE configurations
+.vs/
+.vscode/
+.idea/
+*.ntvs*
+*.njsproj
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cosign keys — private key MUST NOT be committed; exclude both for safety
+cosign-key.key
+cosign-key.pub
+offline-config.json
+
+# NuGet build output packages
+nupkg/
+*.nupkg
+
+# Agent configurations (Private)
+.agents/
+.gemini/
+
+# Node (frontend template dev)
+node_modules/
+dist/
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.pyc

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beloved-assembly-worker
+  labels:
+    app: beloved-assembly-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: beloved-assembly-worker
+  template:
+    metadata:
+      labels:
+        app: beloved-assembly-worker
+    spec:
+      containers:
+      - name: worker
+        image: beloved/control-plane:latest
+        imagePullPolicy: IfNotPresent
+        command: ["dotnet", "Beloved.ControlPlane.dll", "--worker-only"]
+        env:
+        - name: DatabaseProvider
+          value: "PostgreSQL"
+        - name: ConnectionStrings__PostgresDb
+          value: "Host=postgres-postgresql;Database=beloved;Username=postgres;Password=postgrespassword"
+        - name: RabbitMQ__Host
+          value: "rabbitmq"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: beloved-assembly-worker-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: beloved-assembly-worker
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  cooldownPeriod: 300
+  pollingInterval: 30
+  triggers:
+  - type: rabbitmq
+    metadata:
+      queueName: beloved-assembly-jobs
+      queueLength: "5"
+      host: amqp://guest:guest@rabbitmq:5672/

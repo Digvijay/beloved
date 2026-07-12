@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beloved Control Plane - "Lovable to Beloved"</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.10/signalr.min.js"></script>
+</head>
+<body>
+    <div class="glow-bg"></div>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <aside>
+            <div style="display: flex; flex-direction: column; gap: 2rem;">
+                <div class="brand">
+                    <div class="brand-icon">
+                        <i class="fa-solid fa-heart"></i>
+                    </div>
+                    <div>
+                        <h1 class="brand-title">Beloved</h1>
+                        <span style="font-size: 0.75rem; opacity: 0.5; font-weight: 500; letter-spacing: 1px;">DETERMINISTIC ENGINE</span>
+                    </div>
+                </div>
+
+                <ul class="nav-menu">
+                    <li class="active"><a href="#" class="nav-link"><i class="fa-solid fa-compass"></i> App Factory</a></li>
+                    <li><a href="#" class="nav-link"><i class="fa-solid fa-shield-halved"></i> Zero-Trust Guard</a></li>
+                    <li><a href="#" class="nav-link"><i class="fa-solid fa-server"></i> Sandbox Clusters</a></li>
+                    <li><a href="#" class="nav-link"><i class="fa-solid fa-chart-line"></i> Token Analytics</a></li>
+                </ul>
+            </div>
+
+            <div style="font-size: 0.8rem; opacity: 0.5;">
+                <p>Status: Connected to local Ollama</p>
+                <p>© 2026 beloved.build</p>
+            </div>
+        </aside>
+
+        <!-- Main Panel -->
+        <main>
+            <header>
+                <div class="top-tagline">
+                    You built something <span>Lovable</span>. Now make it <span>Beloved</span>.
+                </div>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <div class="badge badge-live">
+                        <i class="fa-solid fa-circle"></i> Engine Live
+                    </div>
+                </div>
+            </header>
+
+            <div class="workspace">
+                <!-- Left Control Panel -->
+                <div class="left-panel">
+                    <div class="glass-card">
+                        <h3 class="panel-title"><i class="fa-solid fa-wand-magic-sparkles" style="color: var(--accent-primary);"></i> Application Intent</h3>
+                        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            Describe what you want to build. Our deterministic AI mapper will automatically resolve the required OCI components.
+                        </p>
+                        <textarea id="intent-input" class="intent-input" placeholder="e.g., I want an app to manage my products that includes a secure login screen..."></textarea>
+                        <div style="display: flex; justify-content: flex-end; margin-top: 1rem;">
+                            <button class="btn-primary" id="btn-map-intent">
+                                <i class="fa-solid fa-microchip"></i> Map Intent
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="glass-card" style="flex: 1; min-height: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                            <h3 class="panel-title" style="margin: 0;"><i class="fa-solid fa-vault"></i> OCI Component Vault</h3>
+                        </div>
+                        <div class="module-grid" id="modules-container">
+                            <!-- Modules populated by JS -->
+                            <div style="text-align: center; padding: 2rem; opacity: 0.5; grid-column: 1 / -1;">
+                                Loading modules from vault...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Validation Panel -->
+                <div class="right-panel">
+                    <div class="glass-card" style="flex: 1; display: flex; flex-direction: column;">
+                        <h3 class="panel-title"><i class="fa-solid fa-file-code"></i> Assembly Blueprint (JSON)</h3>
+                        <div class="code-viewer" id="blueprint-viewer">
+// Awaiting Intent Mapping...
+                        </div>
+                        <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                            <button class="btn-primary" id="btn-assemble" style="width: 100%;" disabled>
+                                <i class="fa-solid fa-hammer"></i> Assemble Application
+                            </button>
+                            <div id="preview-controls" style="display: none; gap: 0.5rem; justify-content: space-between;">
+                                <button class="btn-secondary" id="btn-preview-start" style="flex: 1;">
+                                    <i class="fa-solid fa-play"></i> Launch Sandbox Preview
+                                </button>
+                                <button class="btn-secondary" id="btn-preview-stop" style="display: none; color: #ff4d4d; border-color: #ff4d4d;">
+                                    <i class="fa-solid fa-stop"></i> Stop
+                                </button>
+                                <a id="preview-link" href="#" target="_blank" class="btn-secondary" style="display: none; text-decoration: none; text-align: center;">
+                                    <i class="fa-solid fa-external-link-alt"></i> Open
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="glass-card" style="flex: 1; display: flex; flex-direction: column; min-height: 200px;">
+                        <h3 class="panel-title"><i class="fa-solid fa-terminal"></i> Engine Logs</h3>
+                        <div class="terminal" id="log-console">
+                            <!-- Logs appear here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beloved-control-plane
+  labels:
+    app: beloved-control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: beloved-control-plane
+  template:
+    metadata:
+      labels:
+        app: beloved-control-plane
+    spec:
+      containers:
+      - name: control-plane
+        image: beloved/control-plane:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: ASPNETCORE_URLS
+          value: "http://+:3000"
+        - name: DatabaseProvider
+          value: "PostgreSQL"
+        - name: ConnectionStrings__PostgresDb
+          value: "Host=postgres-postgresql;Database=beloved;Username=postgres;Password=postgrespassword"
+        - name: RabbitMQ__Host
+          value: "rabbitmq"
+        - name: Stripe__SecretKey
+          valueFrom:
+            secretKeyRef:
+              name: beloved-secrets
+              key: stripe-secret-key
+        resources:
+          limits:
+            cpu: "1"
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz/live
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: beloved-control-plane
+spec:
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+  selector:
+    app: beloved-control-plane

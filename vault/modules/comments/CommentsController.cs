@@ -1,0 +1,1 @@
+using System;using Microsoft.AspNetCore.Mvc;namespace BelovedApp.Controllers;[ApiController][Route("api/comments")]public class CommentsController:ControllerBase{[HttpGet]public IActionResult Get(){return Ok();}}public class CommentEvent{public Guid Id{get;set;}=Guid.NewGuid();}

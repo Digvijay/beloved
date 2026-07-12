@@ -1,0 +1,30 @@
+name: CI Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Restore Dependencies
+      run: dotnet restore Beloved.ControlPlane.sln
+
+    - name: Build Solution
+      run: dotnet build Beloved.ControlPlane.sln --no-restore -c Release
+
+    - name: Run Unit Tests
+      run: dotnet test Beloved.ControlPlane.sln --no-build -c Release --verbosity normal

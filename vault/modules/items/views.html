@@ -1,0 +1,55 @@
+<section id="view-items" class="view-section">
+    <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 2rem;">
+        <!-- Left: Form Card -->
+        <div class="card">
+            <h3><i class="fa-solid fa-plus-circle" style="color: var(--accent-primary); margin-right: 0.5rem;"></i> Add Item</h3>
+            <form id="items-create-form" style="margin-top: 1.5rem;">
+                <div class="form-group">
+                    <label for="item-name">Name</label>
+                    <input type="text" id="item-name" class="form-control" placeholder="Item Name" required>
+                </div>
+                <div class="form-group">
+                    <label for="item-desc">Description</label>
+                    <textarea id="item-desc" class="form-control" rows="3" placeholder="Brief description..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="item-qty">Quantity</label>
+                    <input type="number" id="item-qty" class="form-control" value="1" min="1" required>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Save Item</button>
+            </form>
+        </div>
+
+        <!-- Right: Items List Card -->
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <h3><i class="fa-solid fa-list" style="color: var(--accent-secondary); margin-right: 0.5rem;"></i> Managed Items</h3>
+                <button class="btn btn-secondary" onclick="window.itemsModule.loadItems()">
+                    <i class="fa-solid fa-rotate"></i> Refresh
+                </button>
+            </div>
+            
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Description</th>
+                            <th>Qty</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="items-table-body">
+                        <!-- Loaded items injected here -->
+                        <tr>
+                            <td colspan="5" style="text-align: center; opacity: 0.5; padding: 2rem;">
+                                Log in to view and manage items.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>

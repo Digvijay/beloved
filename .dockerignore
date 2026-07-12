@@ -1,0 +1,21 @@
+# Ignore compilation artifacts
+bin/
+obj/
+
+# Ignore databases
+*.db
+*.db-shm
+*.db-wal
+
+# Ignore test artifacts
+.beloved_artifacts/
+output/
+
+# Ignore local configuration overrides
+appsettings.Development.json
+
+# Ignore IDE files
+.vs/
+.vscode/
+.idea/
+.DS_Store
