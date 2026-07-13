@@ -113,11 +113,12 @@ public class ControlPlaneController : ControllerBase
             await pushProcess!.WaitForExitAsync();
             if (pushProcess.ExitCode != 0) return StatusCode(500, "Docker push failed: " + await pushProcess.StandardError.ReadToEndAsync());
 
-            // Cosign sign
+            var keyPath = Path.Combine(AppContext.BaseDirectory, "cosign-key.key");
+            var configPath = Path.Combine(AppContext.BaseDirectory, "offline-config.json");
             var cosignInfo = new ProcessStartInfo
             {
                 FileName = "cosign",
-                Arguments = $"sign --key /Users/digvijay/github/beloved/cosign-key.key --signing-config /Users/digvijay/github/beloved/offline-config.json --allow-http-registry {tag}",
+                Arguments = $"sign --key {keyPath} --signing-config {configPath} --allow-http-registry {tag}",
                 WorkingDirectory = extractPath,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

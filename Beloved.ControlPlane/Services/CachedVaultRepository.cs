@@ -59,6 +59,33 @@ public sealed class CachedVaultRepository : IVaultRepository
         return result;
     }
 
+    public async Task<(Dictionary<string, byte[]> files, string digest)> FetchTemplateInMemoryAsync(string templateName)
+    {
+        var cacheKey = $"vault:template:mem:{templateName}";
+        if (_cache.TryGetValue(cacheKey, out (Dictionary<string, byte[]> files, string digest) cachedResult))
+        {
+            // Clone the dictionary to prevent cross-request contamination
+            return (new Dictionary<string, byte[]>(cachedResult.files), cachedResult.digest);
+        }
+
+        var result = await _inner.FetchTemplateInMemoryAsync(templateName);
+        _cache.Set(cacheKey, result, TimeSpan.FromMinutes(30));
+        return (new Dictionary<string, byte[]>(result.files), result.digest);
+    }
+
+    public async Task<(Dictionary<string, byte[]> files, string digest)> FetchModuleInMemoryAsync(string moduleName, string version)
+    {
+        var cacheKey = $"vault:module:mem:{moduleName}:{version}";
+        if (_cache.TryGetValue(cacheKey, out (Dictionary<string, byte[]> files, string digest) cachedResult))
+        {
+            return (new Dictionary<string, byte[]>(cachedResult.files), cachedResult.digest);
+        }
+
+        var result = await _inner.FetchModuleInMemoryAsync(moduleName, version);
+        _cache.Set(cacheKey, result, TimeSpan.FromMinutes(30));
+        return (new Dictionary<string, byte[]>(result.files), result.digest);
+    }
+
     public Task PushModuleAsync(string modulePath, string moduleName, string version)
     {
         // Invalidate cache on new module push

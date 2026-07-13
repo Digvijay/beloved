@@ -38,6 +38,51 @@ namespace Beloved.AssemblyEngine
             return Task.FromResult((targetDirectory, "local-digest-" + moduleName));
         }
 
+        public Task<(Dictionary<string, byte[]> files, string digest)> FetchTemplateInMemoryAsync(string templateName)
+        {
+            var sourcePath = Path.Combine(_vaultPath, "templates", templateName);
+            if (!Directory.Exists(sourcePath))
+            {
+                throw new DirectoryNotFoundException($"Template {templateName} not found in vault.");
+            }
+
+            var files = LoadDirectoryToMemory(sourcePath);
+            return Task.FromResult((files, "local-digest-" + templateName));
+        }
+
+        public Task<(Dictionary<string, byte[]> files, string digest)> FetchModuleInMemoryAsync(string moduleName, string version)
+        {
+            var sourcePath = Path.Combine(_vaultPath, "modules", moduleName.ToLower());
+            if (!Directory.Exists(sourcePath))
+            {
+                throw new DirectoryNotFoundException($"Module {moduleName} not found in vault.");
+            }
+
+            var files = LoadDirectoryToMemory(sourcePath);
+            return Task.FromResult((files, "local-digest-" + moduleName));
+        }
+
+        private static Dictionary<string, byte[]> LoadDirectoryToMemory(string sourceDir)
+        {
+            var files = new Dictionary<string, byte[]>();
+            LoadDirectoryToMemoryInternal(sourceDir, sourceDir, files);
+            return files;
+        }
+
+        private static void LoadDirectoryToMemoryInternal(string rootDir, string currentDir, Dictionary<string, byte[]> files)
+        {
+            foreach (var file in Directory.GetFiles(currentDir))
+            {
+                var relPath = Path.GetRelativePath(rootDir, file);
+                files[relPath] = File.ReadAllBytes(file);
+            }
+
+            foreach (var directory in Directory.GetDirectories(currentDir))
+            {
+                LoadDirectoryToMemoryInternal(rootDir, directory, files);
+            }
+        }
+
         public Task PushModuleAsync(string modulePath, string moduleName, string version)
         {
             var moduleDest = Path.Combine(_vaultPath, "modules", moduleName.ToLower());

@@ -16,6 +16,7 @@ output/
 # Assembled artifacts & test downloads
 *.zip
 cli-test/
+extracted_app/
 
 # Local project config (written by `beloved init`)
 beloved.json

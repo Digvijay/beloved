@@ -11,4 +11,5 @@ public interface IAssemblyPlugin
 {
     string Name { get; }
     Task ExecuteAsync(string appPath, Blueprint blueprint, Action<string>? onLog = null);
+    Task ExecuteInMemoryAsync(System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> workspace, Blueprint blueprint, Action<string>? onLog = null);
 }

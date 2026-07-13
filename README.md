@@ -241,7 +241,9 @@ k8s/                        # Raw Kubernetes manifests
    ```
 4. Verify with `beloved generate "... with my-feature"`.
 
-No changes to the Assembly Engine are needed — module discovery is fully dynamic.
+### Verification and Walkthroughs
+
+For a detailed step-by-step E2E setup, assembly run, database migration, and browser UI verification walkthrough, refer to the [Verification Walkthrough](./docs/walkthrough.md).
 
 ### Environment variables
 

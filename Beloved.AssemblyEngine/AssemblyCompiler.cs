@@ -45,6 +45,7 @@ public class BackendConfig
 [JsonSerializable(typeof(Blueprint))]
 [JsonSerializable(typeof(ModuleManifest))]
 [JsonSerializable(typeof(Sbom))]
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class AssemblyJsonContext : JsonSerializerContext
 {
 }
@@ -76,13 +77,7 @@ public class AssemblyCompiler
     private readonly IVaultRepository _vaultRepository;
     private readonly IEnumerable<IAssemblyPlugin> _plugins;
 
-    // Per-manifest component props passed from the parallel fan-out
-    private sealed record ModuleStitchResult(
-        List<string> NavInjections,
-        List<string> ViewInjections,
-        List<string> ImportInjections,
-        List<string> DbSetInjections,
-        SbomComponent? SbomEntry);
+    private static readonly System.Diagnostics.ActivitySource CompilerActivitySource = new System.Diagnostics.ActivitySource("Beloved.AssemblyEngine");
 
     public AssemblyCompiler(IVaultRepository vaultRepository, IEnumerable<IAssemblyPlugin> plugins)
     {
@@ -92,42 +87,62 @@ public class AssemblyCompiler
 
     public async Task<AssemblyResult> AssembleAsync(string blueprintJson, string jobId, IOutputStore outputStore, Action<string>? onLog = null)
     {
-        var blueprint = JsonSerializer.Deserialize(blueprintJson, AssemblyJsonContext.Default.Blueprint);
-        if (blueprint == null) return new AssemblyResult { Success = false };
+        using var activity = CompilerActivitySource.StartActivity("AssembleApp");
+        activity?.SetTag("job.id", jobId);
 
-        onLog?.Invoke($"Starting assembly for application: {blueprint.AppName}");
+        Blueprint? blueprint;
+        try
+        {
+            blueprint = JsonSerializer.Deserialize(blueprintJson, AssemblyJsonContext.Default.Blueprint);
+            if (blueprint == null) return new AssemblyResult { Success = false };
+        }
+        catch (JsonException)
+        {
+            return new AssemblyResult { Success = false };
+        }
+
+        onLog?.Invoke($"[In-Memory] Starting assembly for application: {blueprint.AppName}");
 
         var cleanAppName = blueprint.AppName.Replace(" ", "");
-        var tempWorkspace = Path.Combine(Path.GetTempPath(), "beloved_workspace_" + Guid.NewGuid().ToString());
-        var appPath = Path.Combine(tempWorkspace, cleanAppName);
-        var frontendDest = Path.Combine(appPath, "frontend");
-        var backendDest = Path.Combine(appPath, "backend");
-        var tempModulesDir = Path.Combine(tempWorkspace, "modules");
-
         var isApiOnly = blueprint.Target.Equals("ApiOnly", StringComparison.OrdinalIgnoreCase);
-
-        // Create directories
-        Directory.CreateDirectory(appPath);
-        if (!isApiOnly)
-        {
-            Directory.CreateDirectory(frontendDest);
-        }
-        Directory.CreateDirectory(backendDest);
-        Directory.CreateDirectory(tempModulesDir);
 
         var sbom = new Sbom { ProjectName = cleanAppName, JobId = jobId };
 
-        // 1. Fetch base templates concurrently — frontend + backend in parallel
-        onLog?.Invoke("Fetching base templates from OCI Vault in parallel...");
-        var templateTasks = new List<Task<(string targetDirectory, string digest)>>();
-        if (!isApiOnly) templateTasks.Add(_vaultRepository.FetchTemplateAsync("react-frontend", frontendDest));
-        templateTasks.Add(_vaultRepository.FetchTemplateAsync("dotnet-backend", backendDest));
-        var templateResults = await Task.WhenAll(templateTasks);
+        // Concurrent in-memory workspace: maps relative file path (e.g., "backend/Program.cs") to byte array content
+        var workspace = new ConcurrentDictionary<string, byte[]>();
 
-        if (!isApiOnly) sbom.Components.Add(new SbomComponent { Name = "templates/react-frontend", Version = "latest", Digest = templateResults[0].digest });
-        sbom.Components.Add(new SbomComponent { Name = "templates/dotnet-backend", Version = "latest", Digest = templateResults[^1].digest });
+        // 1. Fetch base templates concurrently in-memory
+        onLog?.Invoke("[In-Memory] Fetching base templates from OCI Vault in parallel...");
+        var reactTask = isApiOnly 
+            ? Task.FromResult<(Dictionary<string, byte[]> files, string digest)>((new(), "")) 
+            : _vaultRepository.FetchTemplateInMemoryAsync("react-frontend");
+        var dotnetTask = _vaultRepository.FetchTemplateInMemoryAsync("dotnet-backend");
 
-        // Thread-safe accumulators — written to from concurrent module tasks
+        await Task.WhenAll(reactTask, dotnetTask);
+
+        var (reactFiles, reactDigest) = await reactTask;
+        var (dotnetFiles, dotnetDigest) = await dotnetTask;
+
+        if (!isApiOnly)
+        {
+            foreach (var file in reactFiles)
+            {
+                // Prefix with frontend/
+                var key = "frontend/" + file.Key.TrimStart('/');
+                workspace[key] = file.Value;
+            }
+            sbom.Components.Add(new SbomComponent { Name = "templates/react-frontend", Version = "latest", Digest = reactDigest });
+        }
+
+        foreach (var file in dotnetFiles)
+        {
+            // Prefix with backend/
+            var key = "backend/" + file.Key.TrimStart('/');
+            workspace[key] = file.Value;
+        }
+        sbom.Components.Add(new SbomComponent { Name = "templates/dotnet-backend", Version = "latest", Digest = dotnetDigest });
+
+        // Thread-safe accumulators for stitching
         var navInjections    = new ConcurrentBag<string>();
         var viewInjections   = new ConcurrentBag<string>();
         var importInjections = new ConcurrentBag<string>();
@@ -136,23 +151,23 @@ public class AssemblyCompiler
 
         try
         {
-            // 3. Fan-out: fetch and process ALL modules in parallel
-            onLog?.Invoke($"Fetching {blueprint.Modules.Count} module(s) from Vault in parallel...");
+            // 2. Fetch and process ALL modules concurrently in-memory
+            onLog?.Invoke($"[In-Memory] Fetching {blueprint.Modules.Count} module(s) from Vault in parallel...");
             await Task.WhenAll(blueprint.Modules.Select(modName =>
-                ProcessModuleAsync(
-                    modName, tempModulesDir, frontendDest, backendDest, isApiOnly,
+                ProcessModuleInMemoryAsync(
+                    modName, isApiOnly, workspace,
                     navInjections, viewInjections, importInjections, dbSetInjections, sbomEntries,
                     onLog)));
 
             foreach (var entry in sbomEntries) sbom.Components.Add(entry);
             
-            onLog?.Invoke("Stitching module definitions into core engine...");
+            onLog?.Invoke("[In-Memory] Stitching module definitions into core engine...");
             
-            // 4. Stitch Backend Program.cs
-            var programPath = Path.Combine(backendDest, "Program.cs");
-            if (File.Exists(programPath))
+            // 3. Stitch Backend Program.cs
+            var programPath = "backend/Program.cs";
+            if (workspace.TryGetValue(programPath, out var programBytes))
             {
-                var programContent = await File.ReadAllTextAsync(programPath);
+                var programContent = Encoding.UTF8.GetString(programBytes);
                 var sb = new StringBuilder(programContent);
 
                 // Inject Database setup
@@ -178,13 +193,13 @@ public class AssemblyCompiler
                     "// DBSETS_PLACEHOLDER",
                     string.Join("\n    ", dbSetInjections.ToList())
                 );
-                await File.WriteAllTextAsync(programPath, sb.ToString());
+                workspace[programPath] = Encoding.UTF8.GetBytes(sb.ToString());
 
                 // Update csproj with database package references if needed
-                var csprojPath = Path.Combine(backendDest, "dotnet-backend.csproj");
-                if (File.Exists(csprojPath))
+                var csprojPath = "backend/dotnet-backend.csproj";
+                if (workspace.TryGetValue(csprojPath, out var csprojBytes))
                 {
-                    var csprojContent = await File.ReadAllTextAsync(csprojPath);
+                    var csprojContent = Encoding.UTF8.GetString(csprojBytes);
                     if (blueprint.Database.Equals("PostgreSQL", StringComparison.OrdinalIgnoreCase))
                     {
                         csprojContent = csprojContent.Replace(
@@ -199,93 +214,100 @@ public class AssemblyCompiler
                             "<PackageReference Include=\"Microsoft.EntityFrameworkCore.SqlServer\" Version=\"9.0.0\" />"
                         );
                     }
-                    await File.WriteAllTextAsync(csprojPath, csprojContent);
+                    workspace[csprojPath] = Encoding.UTF8.GetBytes(csprojContent);
                 }
             }
 
-            var backendAppDbContextPath = Path.Combine(backendDest, "AppDbContext.cs");
-            if (File.Exists(backendAppDbContextPath))
+            var backendAppDbContextPath = "backend/AppDbContext.cs";
+            if (workspace.TryGetValue(backendAppDbContextPath, out var dbContextBytes))
             {
-                var originalDb = await File.ReadAllTextAsync(backendAppDbContextPath);
+                var originalDb = Encoding.UTF8.GetString(dbContextBytes);
                 var sb = new StringBuilder(originalDb);
                 sb.Replace("/* INJECT_DBSETS */", string.Join("\n    ", dbSetInjections.ToList()));
-                await File.WriteAllTextAsync(backendAppDbContextPath, sb.ToString());
+                workspace[backendAppDbContextPath] = Encoding.UTF8.GetBytes(sb.ToString());
             }
 
-            // 5. Stitch Frontend App.tsx
-            var appTsxPath = Path.Combine(frontendDest, "src", "App.tsx");
-            if (File.Exists(appTsxPath))
+            // 4. Stitch Frontend App.tsx
+            if (!isApiOnly)
             {
-                var appTsxContent = await File.ReadAllTextAsync(appTsxPath);
-                
-                var sb = new StringBuilder();
-                // Inject collected import paths from manifests
-                sb.AppendLine(string.Join("\n", importInjections));
-                sb.Append(appTsxContent);
+                var appTsxPath = "frontend/src/App.tsx";
+                if (workspace.TryGetValue(appTsxPath, out var appTsxBytes))
+                {
+                    var appTsxContent = Encoding.UTF8.GetString(appTsxBytes);
+                    
+                    var sb = new StringBuilder();
+                    // Inject collected import paths from manifests
+                    sb.AppendLine(string.Join("\n", importInjections));
+                    sb.Append(appTsxContent);
 
-                sb.Replace(
-                    "{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}",
-                    string.Join("\n          ", navInjections.ToList())
-                );
+                    sb.Replace(
+                        "{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}",
+                        string.Join("\n          ", navInjections.ToList())
+                    );
 
-                sb.Replace(
-                    "{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}",
-                    string.Join("\n          ", viewInjections.ToList())
-                );
+                    sb.Replace(
+                        "{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}",
+                        string.Join("\n          ", viewInjections.ToList())
+                    );
 
-                await File.WriteAllTextAsync(appTsxPath, sb.ToString());
+                    workspace[appTsxPath] = Encoding.UTF8.GetBytes(sb.ToString());
+                }
             }
 
-            onLog?.Invoke("Generating Software Bill of Materials (SBOM)...");
+            onLog?.Invoke("[In-Memory] Generating Software Bill of Materials (SBOM)...");
             var sbomJson = JsonSerializer.Serialize(sbom, AssemblyJsonContext.Default.Sbom);
-            await File.WriteAllTextAsync(Path.Combine(appPath, "sbom.json"), sbomJson);
+            workspace["sbom.json"] = Encoding.UTF8.GetBytes(sbomJson);
 
-            // Run registered plugins
+            // Run registered plugins in-memory
             foreach (var plugin in _plugins)
             {
                 try
                 {
-                    await plugin.ExecuteAsync(appPath, blueprint, onLog);
+                    await plugin.ExecuteInMemoryAsync(workspace, blueprint, onLog);
                 }
                 catch (Exception ex)
                 {
-                    onLog?.Invoke($"[Plugin Error] Failed to execute {plugin.Name}: {ex.Message}");
+                    onLog?.Invoke($"[Plugin Error] Failed to execute {plugin.Name} in-memory: {ex.Message}");
                 }
             }
 
-            onLog?.Invoke("Compressing final artifacts...");
-            var zipPath = Path.Combine(tempWorkspace, $"{jobId}.zip");
-            ZipFile.CreateFromDirectory(appPath, zipPath);
-
-            onLog?.Invoke("Streaming artifacts to remote Output Store...");
-            using (var zipStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            onLog?.Invoke("[In-Memory] Compressing final workspace to stream...");
+            using var zipMs = new MemoryStream();
+            using (var archive = new ZipArchive(zipMs, ZipArchiveMode.Create, true))
             {
-                await outputStore.StoreArtifactAsync(jobId, zipStream);
+                foreach (var file in workspace)
+                {
+                    // Create entry inside zip with app prefix path to mirror previous zip structure
+                    var entryPath = $"{cleanAppName}/{file.Key}";
+                    var entry = archive.CreateEntry(entryPath, CompressionLevel.Optimal);
+                    using var entryStream = entry.Open();
+                    await entryStream.WriteAsync(file.Value, 0, file.Value.Length);
+                }
             }
 
-            onLog?.Invoke($"Assembly completed successfully! Artifact is now available for download.");
+            zipMs.Position = 0;
+            onLog?.Invoke("[In-Memory] Streaming artifact to remote Output Store...");
+            await outputStore.StoreArtifactAsync(jobId, zipMs);
+
+            onLog?.Invoke($"[In-Memory] Assembly completed successfully! Artifact is now available for download.");
             return new AssemblyResult { Success = true, SbomJson = sbomJson };
         }
-        finally
+        catch (Exception ex)
         {
-            if (Directory.Exists(tempWorkspace))
-            {
-                Directory.Delete(tempWorkspace, true);
-            }
+            onLog?.Invoke($"[Assembly Failure] {ex.Message}");
+            throw;
         }
     }
 
     /// <summary>
-    /// Processes a single module: fetches from OCI, copies controllers, collects
-    /// nav/view/import/dbset injection strings. Designed to run concurrently
-    /// for any number of modules without synchronisation issues.
+    /// Processes a single module completely in memory: fetches OCI dictionary,
+    /// maps controllers, collects nav/view/import/dbset injection strings, and
+    /// merges module views/controllers into the shared workspace.
     /// </summary>
-    private async Task ProcessModuleAsync(
+    private async Task ProcessModuleInMemoryAsync(
         string modName,
-        string tempModulesDir,
-        string frontendDest,
-        string backendDest,
         bool isApiOnly,
+        ConcurrentDictionary<string, byte[]> workspace,
         ConcurrentBag<string> navInjections,
         ConcurrentBag<string> viewInjections,
         ConcurrentBag<string> importInjections,
@@ -293,44 +315,48 @@ public class AssemblyCompiler
         ConcurrentBag<SbomComponent> sbomEntries,
         Action<string>? onLog)
     {
-        var modDir = Path.Combine(tempModulesDir, modName.ToLower());
+        using var activity = CompilerActivitySource.StartActivity("ProcessModule");
+        activity?.SetTag("module.name", modName);
+
+        Dictionary<string, byte[]> modFiles;
+        string digest;
         try
         {
-            onLog?.Invoke($"[parallel] Pulling module '{modName}' from Vault...");
-            var modArtifact = await _vaultRepository.FetchModuleAsync(modName, "latest", modDir);
+            onLog?.Invoke($"[parallel-mem] Pulling module '{modName}' from Vault...");
+            var result = await _vaultRepository.FetchModuleInMemoryAsync(modName, "latest");
+            modFiles = result.files;
+            digest = result.digest;
+
             sbomEntries.Add(new SbomComponent
             {
                 Name    = $"modules/{modName.ToLower()}",
                 Version = "latest",
-                Digest  = modArtifact.digest
+                Digest  = digest
             });
         }
         catch (Exception ex)
         {
-            onLog?.Invoke($"[parallel] Skipping module '{modName}': {ex.Message}");
-            return; // Non-fatal: skip unavailable modules
+            onLog?.Invoke($"[parallel-mem] Skipping module '{modName}': {ex.Message}");
+            return;
         }
 
-        if (!Directory.Exists(modDir)) return;
+        var manifestKey = "manifest.json";
+        if (!modFiles.TryGetValue(manifestKey, out var manifestBytes)) return;
 
-        var manifestPath = Path.Combine(modDir, "manifest.json");
-        if (!File.Exists(manifestPath)) return;
-
-        var manifestJson = await File.ReadAllTextAsync(manifestPath);
+        var manifestJson = Encoding.UTF8.GetString(manifestBytes);
         var manifest = JsonSerializer.Deserialize(manifestJson, AssemblyJsonContext.Default.ModuleManifest);
         if (manifest == null) return;
 
-        // ── Backend: copy controllers (each module writes to its own filename, safe) ──
+        // ── Backend: Copy controllers into workspace in-memory ──
         if (manifest.Backend?.Controllers != null)
         {
             foreach (var controllerFile in manifest.Backend.Controllers)
             {
-                var source = Path.Combine(modDir, controllerFile);
-                if (File.Exists(source))
+                var cleanFileKey = controllerFile.TrimStart('/');
+                if (modFiles.TryGetValue(cleanFileKey, out var controllerBytes))
                 {
-                    var dest = Path.Combine(backendDest, "Controllers", Path.GetFileName(source));
-                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                    File.Copy(source, dest, overwrite: true);
+                    var destKey = $"backend/Controllers/{Path.GetFileName(cleanFileKey)}";
+                    workspace[destKey] = controllerBytes;
                 }
             }
         }
@@ -338,7 +364,7 @@ public class AssemblyCompiler
         if (!string.IsNullOrEmpty(manifest.Backend?.DbSets))
             dbSetInjections.Add(manifest.Backend.DbSets);
 
-        // ── Frontend: copy view files and collect injection strings ──
+        // ── Frontend: Copy views and collect nav/imports in-memory ──
         if (!isApiOnly && manifest.Frontend != null)
         {
             if (!string.IsNullOrEmpty(manifest.Frontend.Nav))
@@ -349,16 +375,13 @@ public class AssemblyCompiler
 
             if (!string.IsNullOrEmpty(manifest.Frontend.Views))
             {
-                var viewSource = Path.Combine(modDir, manifest.Frontend.Views);
-                if (File.Exists(viewSource))
+                var cleanViewKey = manifest.Frontend.Views.TrimStart('/');
+                if (modFiles.TryGetValue(cleanViewKey, out var viewBytes))
                 {
-                    // Each module writes to its own named subdirectory — no collision
-                    var viewsDestDir = Path.Combine(frontendDest, "src", "modules", manifest.Name);
-                    Directory.CreateDirectory(viewsDestDir);
-                    File.Copy(viewSource, Path.Combine(viewsDestDir, "react-views.tsx"), overwrite: true);
+                    var destKey = $"frontend/src/modules/{manifest.Name}/react-views.tsx";
+                    workspace[destKey] = viewBytes;
                 }
 
-                // Dynamic view-binding: derive tab key and component tag from manifest name
                 var componentName = manifest.Name;
                 var viewTagName   = componentName + "View";
 
@@ -367,13 +390,24 @@ public class AssemblyCompiler
                     viewInjections.Add("{activeTab === 'login' && <LoginView login={login} request={request} setActiveTab={setActiveTab} />}");
                     viewInjections.Add("{activeTab === 'register' && <RegisterView login={login} request={request} setActiveTab={setActiveTab} />}");
                 }
+                else if (componentName.Equals("OktaAuth", StringComparison.OrdinalIgnoreCase))
+                {
+                    viewInjections.Add("{activeTab === 'oktaauth' && <OktaAuthView login={login} request={request} setActiveTab={setActiveTab} />}");
+                }
+                else if (componentName.Equals("EntraIdAuth", StringComparison.OrdinalIgnoreCase))
+                {
+                    viewInjections.Add("{activeTab === 'entraidauth' && <EntraIdAuthView login={login} request={request} setActiveTab={setActiveTab} />}");
+                }
+                else if (componentName.Equals("GithubAuth", StringComparison.OrdinalIgnoreCase))
+                {
+                    viewInjections.Add("{activeTab === 'githubauth' && <GithubAuthView login={login} request={request} setActiveTab={setActiveTab} />}");
+                }
                 else if (componentName.Equals("Items", StringComparison.OrdinalIgnoreCase))
                 {
                     viewInjections.Add("{activeTab === 'items' && <ItemsView request={request} token={token} />}");
                 }
                 else
                 {
-                    // Fully generic: any future module is automatically wired without compiler changes
                     viewInjections.Add($"{{activeTab === '{componentName.ToLower()}' && <{viewTagName} request={{request}} activeTab={{activeTab}} />}}");
                 }
             }

@@ -34,15 +34,24 @@ namespace Beloved.ControlPlane.Data
                 .HasForeignKey(t => t.OrganisationId)
                 .IsRequired(false);
 
+            modelBuilder.Entity<Tenant>()
+                .HasIndex(t => t.OrganisationId);
+
             modelBuilder.Entity<Project>()
                 .HasOne(p => p.Tenant)
                 .WithMany(t => t.Projects)
                 .HasForeignKey(p => p.TenantId);
 
+            modelBuilder.Entity<Project>()
+                .HasIndex(p => p.TenantId);
+
             modelBuilder.Entity<AssemblyJob>()
                 .HasOne(j => j.Project)
                 .WithMany(p => p.Jobs)
                 .HasForeignKey(j => j.ProjectId);
+
+            modelBuilder.Entity<AssemblyJob>()
+                .HasIndex(j => j.ProjectId);
 
             modelBuilder.Entity<Webhook>()
                 .HasOne(w => w.Tenant)
@@ -91,11 +100,17 @@ namespace Beloved.ControlPlane.Data
                 .HasIndex(m => new { m.OrganisationId, m.UserId })
                 .IsUnique();
 
+            modelBuilder.Entity<OrganisationMember>()
+                .HasIndex(m => m.UserId);
+
             // ── RefreshToken ───────────────────────────────────────────────────
             modelBuilder.Entity<RefreshToken>()
                 .HasOne(r => r.User)
                 .WithMany()
                 .HasForeignKey(r => r.UserId);
+
+            modelBuilder.Entity<RefreshToken>()
+                .HasIndex(r => r.UserId);
 
             modelBuilder.Entity<RefreshToken>()
                 .HasIndex(r => r.Token)

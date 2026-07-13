@@ -391,7 +391,7 @@ public class AssemblyCompilerTests : IDisposable
     {
         var mock = new Mock<IVaultRepository>();
 
-        // Templates — copy from our fixture dirs
+        // Templates — path versions
         mock.Setup(v => v.FetchTemplateAsync("react-frontend", It.IsAny<string>()))
             .Returns<string, string>((_, dest) =>
             {
@@ -406,7 +406,35 @@ public class AssemblyCompilerTests : IDisposable
                 return Task.FromResult((dest, "sha256:dotnet-stub"));
             });
 
+        // In-memory templates mock
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend"))
+            .ReturnsAsync(() => (LoadDirectoryToMemory(_frontendSrc), "sha256:react-stub-mem"));
+
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend"))
+            .ReturnsAsync(() => (LoadDirectoryToMemory(_backendSrc), "sha256:dotnet-stub-mem"));
+
         return mock;
+    }
+
+    private static Dictionary<string, byte[]> LoadDirectoryToMemory(string sourceDir)
+    {
+        var files = new Dictionary<string, byte[]>();
+        LoadDirectoryToMemoryInternal(sourceDir, sourceDir, files);
+        return files;
+    }
+
+    private static void LoadDirectoryToMemoryInternal(string rootDir, string currentDir, Dictionary<string, byte[]> files)
+    {
+        foreach (var file in Directory.GetFiles(currentDir))
+        {
+            var relPath = Path.GetRelativePath(rootDir, file).Replace('\\', '/');
+            files[relPath] = File.ReadAllBytes(file);
+        }
+
+        foreach (var directory in Directory.GetDirectories(currentDir))
+        {
+            LoadDirectoryToMemoryInternal(rootDir, directory, files);
+        }
     }
 
     private void SetupModule(Mock<IVaultRepository> mock, string moduleName, string manifestJson)
@@ -417,6 +445,16 @@ public class AssemblyCompilerTests : IDisposable
                 Directory.CreateDirectory(dest);
                 File.WriteAllText(Path.Combine(dest, "manifest.json"), manifestJson);
                 return Task.FromResult((dest, $"sha256:{name}-stub"));
+            });
+
+        mock.Setup(v => v.FetchModuleInMemoryAsync(moduleName, "latest"))
+            .ReturnsAsync(() => 
+            {
+                var files = new Dictionary<string, byte[]>
+                {
+                    { "manifest.json", Encoding.UTF8.GetBytes(manifestJson) }
+                };
+                return (files, $"sha256:{moduleName}-stub-mem");
             });
     }
 
@@ -485,6 +523,17 @@ public class AssemblyCompilerTests : IDisposable
                 return Task.FromResult((dest, "sha256:analytics-stub"));
             });
 
+        mock.Setup(v => v.FetchModuleInMemoryAsync("Analytics", "latest"))
+            .ReturnsAsync(() =>
+            {
+                var files = new Dictionary<string, byte[]>
+                {
+                    { "manifest.json", Encoding.UTF8.GetBytes("{\"name\":\"Analytics\",\"description\":\"\",\"frontend\":{\"nav\":\"<li>Analytics</li>\",\"views\":\"react-views.tsx\",\"imports\":\"import { AnalyticsView } from './modules/Analytics/react-views';\"},\"backend\":{\"controllers\":[],\"dbSets\":\"\"}}") },
+                    { "react-views.tsx", Encoding.UTF8.GetBytes("export function AnalyticsView() { return null; }") }
+                };
+                return (files, "sha256:analytics-stub-mem");
+            });
+
         var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
         var blueprint = new Blueprint { AppName = "AnalyticsApp", Modules = new() { "Analytics" } };
         var result = await compiler.AssembleAsync(
@@ -498,7 +547,7 @@ public class AssemblyCompilerTests : IDisposable
     public async Task Assemble_UnavailableModule_IsSkippedGracefully()
     {
         var mock = BuildMockVault();
-        mock.Setup(v => v.FetchModuleAsync("BrokenModule", "latest", It.IsAny<string>()))
+        mock.Setup(v => v.FetchModuleInMemoryAsync("BrokenModule", "latest"))
             .ThrowsAsync(new Exception("OCI registry returned 404"));
 
         var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
@@ -521,15 +570,16 @@ public class AssemblyCompilerTests : IDisposable
         foreach (var mod in new[] { "ModA", "ModB", "ModC" })
         {
             var capture = mod;
-            mock.Setup(v => v.FetchModuleAsync(capture, "latest", It.IsAny<string>()))
-                .Returns<string, string, string>(async (_, _, dest) =>
+            mock.Setup(v => v.FetchModuleInMemoryAsync(capture, "latest"))
+                .Returns<string, string>(async (_, _) =>
                 {
                     fetchOrder.Add(capture);
                     await Task.Delay(50); // simulate I/O
-                    Directory.CreateDirectory(dest);
-                    File.WriteAllText(Path.Combine(dest, "manifest.json"),
-                        $"{{\"name\":\"{capture}\",\"description\":\"\",\"frontend\":{{\"nav\":\"\",\"views\":\"\",\"imports\":\"\"}},\"backend\":{{\"controllers\":[],\"dbSets\":\"\"}}}}");
-                    return (dest, $"sha256:{capture}");
+                    var files = new Dictionary<string, byte[]>
+                    {
+                        { "manifest.json", Encoding.UTF8.GetBytes($"{{\"name\":\"{capture}\",\"description\":\"\",\"frontend\":{{\"nav\":\"\",\"views\":\"\",\"imports\":\"\"}},\"backend\":{{\"controllers\":[],\"dbSets\":\"\"}}}}") }
+                    };
+                    return (files, $"sha256:{capture}");
                 });
         }
 
@@ -560,7 +610,7 @@ public class AssemblyCompilerTests : IDisposable
 
         Assert.True(result.Success);
         // react-frontend template should never be fetched
-        mock.Verify(v => v.FetchTemplateAsync("react-frontend", It.IsAny<string>()), Times.Never);
+        mock.Verify(v => v.FetchTemplateInMemoryAsync("react-frontend"), Times.Never);
     }
 
     [Fact]
@@ -615,5 +665,1873 @@ public class WebhookModelTests
         var saved = await db.Webhooks.FirstAsync();
         Assert.Equal("https://receiver.io", saved.Url);
         Assert.True(saved.IsActive);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assembly Compiler Stress Tests
+// ─────────────────────────────────────────────────────────────────────────────
+public class AssemblyCompilerStressTests : IDisposable
+{
+    private readonly string _tempDir;
+    private readonly string _frontendSrc;
+    private readonly string _backendSrc;
+    private readonly LocalDiskOutputStore _store = new();
+
+    public AssemblyCompilerStressTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), "beloved_stress_test_" + Guid.NewGuid().ToString("N"));
+        _frontendSrc = Path.Combine(_tempDir, "react-frontend");
+        _backendSrc  = Path.Combine(_tempDir, "dotnet-backend");
+
+        Directory.CreateDirectory(Path.Combine(_frontendSrc, "src"));
+        File.WriteAllText(Path.Combine(_frontendSrc, "src", "App.tsx"),
+            "// placeholder\n{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}\n{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}");
+        File.WriteAllText(Path.Combine(_frontendSrc, "src", "index.css"), "/* css */");
+
+        Directory.CreateDirectory(Path.Combine(_backendSrc, "Controllers"));
+        File.WriteAllText(Path.Combine(_backendSrc, "Program.cs"),
+            "// DATABASE_INJECTION_START\n// DATABASE_INJECTION_END\n// DBSETS_PLACEHOLDER");
+        File.WriteAllText(Path.Combine(_backendSrc, "AppDbContext.cs"),
+            "/* INJECT_DBSETS */");
+        File.WriteAllText(Path.Combine(_backendSrc, "dotnet-backend.csproj"),
+            "<PackageReference Include=\"Microsoft.EntityFrameworkCore.Sqlite\" Version=\"9.0.0\" />");
+    }
+
+    private static Dictionary<string, byte[]> LoadDirectoryToMemory(string sourceDir)
+    {
+        var files = new Dictionary<string, byte[]>();
+        LoadDirectoryToMemoryInternal(sourceDir, sourceDir, files);
+        return files;
+    }
+
+    private static void LoadDirectoryToMemoryInternal(string rootDir, string currentDir, Dictionary<string, byte[]> files)
+    {
+        foreach (var file in Directory.GetFiles(currentDir))
+        {
+            var relPath = Path.GetRelativePath(rootDir, file).Replace('\\', '/');
+            files[relPath] = File.ReadAllBytes(file);
+        }
+        foreach (var directory in Directory.GetDirectories(currentDir))
+        {
+            LoadDirectoryToMemoryInternal(rootDir, directory, files);
+        }
+    }
+
+    [Fact]
+    public async Task Assemble_HighlyConcurrentLoadStressTest_SucceedsWithoutCorruption()
+    {
+        // Arrange: mock OCI vault containing 3 modules
+        var mock = new Mock<IVaultRepository>();
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend"))
+            .ReturnsAsync(() => (LoadDirectoryToMemory(_frontendSrc), "sha-react"));
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend"))
+            .ReturnsAsync(() => (LoadDirectoryToMemory(_backendSrc), "sha-dotnet"));
+
+        var moduleManifestJson = "{\"name\":\"ModX\",\"description\":\"\",\"frontend\":{\"nav\":\"<li>Item</li>\",\"views\":\"v.tsx\",\"imports\":\"import X;\"},\"backend\":{\"controllers\":[],\"dbSets\":\"\"}}";
+        mock.Setup(v => v.FetchModuleInMemoryAsync(It.IsAny<string>(), "latest"))
+            .ReturnsAsync(() =>
+            {
+                var files = new Dictionary<string, byte[]>
+                {
+                    { "manifest.json", Encoding.UTF8.GetBytes(moduleManifestJson) }
+                };
+                return (files, "sha-mod");
+            });
+
+        var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
+        var blueprint = new Blueprint 
+        { 
+            AppName = "StressApp", 
+            Modules = new() { "Mod1", "Mod2", "Mod3", "Mod4", "Mod5" } 
+        };
+        var blueprintJson = System.Text.Json.JsonSerializer.Serialize(blueprint);
+
+        // Act: trigger 40 parallel compilation jobs simultaneously
+        var tasks = Enumerable.Range(0, 40).Select(i => Task.Run(async () =>
+        {
+            var jobId = $"stress-job-{i}";
+            var result = await compiler.AssembleAsync(blueprintJson, jobId, _store);
+            Assert.True(result.Success);
+            Assert.Contains("templates/react-frontend", result.SbomJson);
+        }));
+
+        await Task.WhenAll(tasks);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_tempDir))
+            Directory.Delete(_tempDir, recursive: true);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vault Repository Unit Coverage Tests
+// ─────────────────────────────────────────────────────────────────────────────
+public class VaultRepositoryCoverageTests : IDisposable
+{
+    private readonly string _tempDir;
+
+    public VaultRepositoryCoverageTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), "beloved_repo_test_" + Guid.NewGuid().ToString("N"));
+        
+        var templateDir = Path.Combine(_tempDir, "vault", "templates", "test-template");
+        Directory.CreateDirectory(templateDir);
+        File.WriteAllText(Path.Combine(templateDir, "index.html"), "<h1>Test</h1>");
+        
+        // Recursive subfolder inside template
+        var subDir = Path.Combine(templateDir, "subdir");
+        Directory.CreateDirectory(subDir);
+        File.WriteAllText(Path.Combine(subDir, "style.css"), "body {}");
+
+        var moduleDir = Path.Combine(_tempDir, "vault", "modules", "test-module");
+        Directory.CreateDirectory(moduleDir);
+        File.WriteAllText(Path.Combine(moduleDir, "manifest.json"), "{}");
+
+        // Recursive subfolder inside module
+        var subModuleDir = Path.Combine(moduleDir, "subdir");
+        Directory.CreateDirectory(subModuleDir);
+        File.WriteAllText(Path.Combine(subModuleDir, "helpers.js"), "const x = 1;");
+    }
+
+    [Fact]
+    public async Task LocalVaultRepository_FetchAndList_InMemory_Succeeds()
+    {
+        var repo = new LocalVaultRepository(_tempDir);
+
+        // Fetch template
+        var (tFiles, tDigest) = await repo.FetchTemplateInMemoryAsync("test-template");
+        Assert.NotEmpty(tFiles);
+        Assert.True(tFiles.ContainsKey("index.html"));
+        Assert.Equal("<h1>Test</h1>", Encoding.UTF8.GetString(tFiles["index.html"]));
+
+        // Fetch module
+        var (mFiles, mDigest) = await repo.FetchModuleInMemoryAsync("test-module", "latest");
+        Assert.NotEmpty(mFiles);
+        Assert.True(mFiles.ContainsKey("manifest.json"));
+
+        // List modules
+        var list = await repo.ListModulesAsync();
+        Assert.Contains("test-module", list);
+
+        // Push module
+        var modSrc = Path.Combine(_tempDir, "new-mod");
+        Directory.CreateDirectory(modSrc);
+        File.WriteAllText(Path.Combine(modSrc, "manifest.json"), "{}");
+        await repo.PushModuleAsync(modSrc, "new-mod", "1.0.0");
+        var listAfterPush = await repo.ListModulesAsync();
+        Assert.Contains("new-mod", listAfterPush);
+
+        // Legacy path-based checks to ensure coverage
+        var pathDest = Path.Combine(_tempDir, "dest-template");
+        var result1 = await repo.FetchTemplateAsync("test-template", pathDest);
+        Assert.True(Directory.Exists(result1.targetDirectory));
+        Assert.True(File.Exists(Path.Combine(result1.targetDirectory, "index.html")));
+
+        var pathDestMod = Path.Combine(_tempDir, "dest-module");
+        var result2 = await repo.FetchModuleAsync("test-module", "latest", pathDestMod);
+        Assert.True(Directory.Exists(result2.targetDirectory));
+        Assert.True(File.Exists(Path.Combine(result2.targetDirectory, "manifest.json")));
+    }
+
+    [Fact]
+    public async Task CachedVaultRepository_CachesInMemoryPayloads()
+    {
+        var mock = new Mock<IVaultRepository>();
+        var tFilesMock = new Dictionary<string, byte[]> { { "App.tsx", new byte[] { 1, 2, 3 } } };
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend"))
+            .ReturnsAsync((tFilesMock, "sha-react"))
+            .Verifiable();
+
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var cachedRepo = new CachedVaultRepository(mock.Object, cache);
+
+        // First call: Should hit inner mock repo
+        var (files1, digest1) = await cachedRepo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.Single(files1);
+
+        // Second call: Should hit memory cache directly without calling mock again
+        var (files2, digest2) = await cachedRepo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.Single(files2);
+
+        mock.Verify(v => v.FetchTemplateInMemoryAsync("react-frontend"), Times.Once);
+
+        // Legacy path caching coverage
+        mock.Setup(v => v.FetchTemplateAsync("react-frontend", "dest-dir"))
+            .ReturnsAsync(("dest-dir", "sha-react-path"))
+            .Verifiable();
+        mock.Setup(v => v.FetchModuleAsync("my-module", "latest", "dest-dir"))
+            .ReturnsAsync(("dest-dir", "sha-module-path"))
+            .Verifiable();
+
+        var pathDest = Path.Combine(_tempDir, "cache-dest-template");
+        Directory.CreateDirectory(Path.Combine(_tempDir, "dest-dir"));
+        File.WriteAllText(Path.Combine(_tempDir, "dest-dir", "App.tsx"), "code");
+
+        // Execute paths to coverage
+        await cachedRepo.FetchTemplateAsync("react-frontend", pathDest);
+        await cachedRepo.FetchModuleAsync("my-module", "latest", pathDest);
+        await cachedRepo.PushModuleAsync("dest-dir", "my-module", "latest");
+        var list = await cachedRepo.ListModulesAsync();
+
+        mock.Verify(v => v.PushModuleAsync("dest-dir", "my-module", "latest"), Times.Once);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_tempDir))
+            Directory.Delete(_tempDir, recursive: true);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics Injection Plugin Coverage Tests
+// ─────────────────────────────────────────────────────────────────────────────
+public class AnalyticsInjectionPluginTests : IDisposable
+{
+    private readonly string _tempDir;
+
+    public AnalyticsInjectionPluginTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), "beloved_plugin_test_" + Guid.NewGuid().ToString("N"));
+    }
+
+    [Fact]
+    public async Task AnalyticsInjectionPlugin_StitchesHtml_InMemory_And_Path()
+    {
+        var plugin = new AnalyticsInjectionPlugin();
+        Assert.Equal("AnalyticsInjection", plugin.Name);
+        var blueprint = new Blueprint { AppName = "TelemetryApp" };
+
+        // Test in-memory injection
+        var workspace = new System.Collections.Concurrent.ConcurrentDictionary<string, byte[]>();
+        workspace["frontend/src/index.html"] = Encoding.UTF8.GetBytes("<html><body>test</body></html>");
+
+        await plugin.ExecuteInMemoryAsync(workspace, blueprint);
+        var stitchedHtml = Encoding.UTF8.GetString(workspace["frontend/src/index.html"]);
+        Assert.Contains("Beloved Telemetry initialized for TelemetryApp", stitchedHtml);
+
+        // Test path-based legacy injection
+        var htmlDir = Path.Combine(_tempDir, "frontend");
+        Directory.CreateDirectory(htmlDir);
+        var htmlPath = Path.Combine(htmlDir, "index.html");
+        await File.WriteAllTextAsync(htmlPath, "<html><body>test</body></html>");
+
+        await plugin.ExecuteAsync(_tempDir, blueprint);
+        var pathStitchedHtml = await File.ReadAllTextAsync(htmlPath);
+        Assert.Contains("Beloved Telemetry initialized for TelemetryApp", pathStitchedHtml);
+
+        // Test path-based exception coverage (passing an invalid target directory path)
+        await plugin.ExecuteAsync("::invalid-path::*", blueprint);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_tempDir))
+            Directory.Delete(_tempDir, recursive: true);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OciVaultRepository Unit Coverage Tests (Mocked HttpClient)
+// ─────────────────────────────────────────────────────────────────────────────
+public class OciVaultRepositoryTests
+{
+    private class MockHttpMessageHandler : DelegatingHandler
+    {
+        private readonly Func<HttpRequestMessage, Task<HttpResponseMessage>> _handler;
+        public MockHttpMessageHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler)
+        {
+            _handler = handler;
+        }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, System.Threading.CancellationToken cancellationToken)
+        {
+            return _handler(request);
+        }
+    }
+
+    [Fact]
+    public async Task FetchTemplateInMemory_FetchesAndExtracts_FromRegistry()
+    {
+        // 1. Arrange: Create a stub tar.gz package containing index.html in memory
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "index.html");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("<h1>Hello from OCI</h1>"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            // Mock Manifest request
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                  "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "size": 702,
+                    "digest": "sha256:config-digest"
+                  },
+                  "layers": [
+                    {
+                      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                      "size": 1234,
+                      "digest": "sha256:layer-digest"
+                    }
+                  ]
+                }
+                """;
+                var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+                response.Headers.Add("Docker-Content-Digest", "sha256:manifest-digest");
+                return response;
+            }
+
+            // Mock Blob request
+            if (uri.Contains("/blobs/sha256:layer-digest"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+
+            // Fallback
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        verifierMock.Setup(v => v.VerifySignature(It.IsAny<byte[]>(), It.IsAny<byte[]>(), It.IsAny<string>()))
+            .Returns(true);
+
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // 2. Act
+        var (files, digest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+
+        // 3. Assert
+        Assert.NotEmpty(files);
+        Assert.True(files.ContainsKey("index.html"));
+        Assert.Equal("<h1>Hello from OCI</h1>", Encoding.UTF8.GetString(files["index.html"]));
+        Assert.Equal("sha256:manifest-digest", digest);
+    }
+
+    [Fact]
+    public async Task FetchModuleInMemory_UnsignedOrSignatureMismatch_ThrowsSecurityException()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": []}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains(".sig"))
+            {
+                // Return 404 for signature file to simulate unsigned manifest
+                return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // Fetching a module (must verify signature, unlike templates)
+        await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
+        {
+            await repo.FetchModuleInMemoryAsync("auth", "latest");
+        });
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_ListModulesAndLegacyPaths_Succeed()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "main.js");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("alert(1);"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/_catalog"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"repositories\":[\"templates/base\",\"modules/auth\",\"modules/billing\"]}", Encoding.UTF8, "application/json")
+                };
+            }
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains("/blobs/"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // List modules
+        var catalog = await repo.ListModulesAsync();
+        Assert.Contains("auth", catalog);
+        Assert.Contains("billing", catalog);
+        Assert.DoesNotContain("base", catalog);
+
+        // Legacy path-based fetch
+        var tempOut = Path.Combine(Path.GetTempPath(), "oci_legacy_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var result = await repo.FetchTemplateAsync("react-frontend", tempOut);
+            Assert.True(File.Exists(Path.Combine(result.targetDirectory, "main.js")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PemSignatureVerifier Unit Coverage Tests (Valid RSA Key Generation)
+// ─────────────────────────────────────────────────────────────────────────────
+public class PemSignatureVerifierTests
+{
+    [Fact]
+    public void VerifySignature_WithValidRsaKeyPair_Succeeds()
+    {
+        var verifier = new PemSignatureVerifier();
+        var payload = Encoding.UTF8.GetBytes("signed-data-content");
+
+        // Generate RSA key pair programmatically to test verifier logic
+        using var rsa = System.Security.Cryptography.RSA.Create(2048);
+        var signature = rsa.SignData(payload, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+
+        // Export public key as PEM
+        var pubKeyPem = rsa.ExportRSAPublicKeyPem();
+
+        var result = verifier.VerifySignature(payload, signature, pubKeyPem);
+        Assert.True(result);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OllamaLlmProvider Unit Coverage Tests
+// ─────────────────────────────────────────────────────────────────────────────
+public class LlmProviderTests
+{
+    private class MockHttpMessageHandler : DelegatingHandler
+    {
+        private readonly Func<HttpRequestMessage, Task<HttpResponseMessage>> _handler;
+        public MockHttpMessageHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler)
+        {
+            _handler = handler;
+        }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, System.Threading.CancellationToken cancellationToken)
+        {
+            return _handler(request);
+        }
+    }
+
+    [Fact]
+    public async Task OllamaLlmProvider_QueriesUrl_And_ParsesResponse()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "choices": [
+                {
+                  "message": {
+                    "content": "{\"appName\": \"TestApp\", \"modules\": [\"Auth\", \"Items\"], \"database\": \"SQLite\", \"authStrategy\": \"None\", \"target\": \"WebAndApi\"}"
+                  }
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:11434") };
+        var provider = new OllamaLlmProvider(client, "llama3");
+        var result = await provider.MapIntentAsync("Build dashboard", new[] { "Auth", "Items" });
+        Assert.NotNull(result);
+        Assert.Equal("TestApp", result.AppName);
+        Assert.Contains("Auth", result.Modules);
+    }
+
+    [Fact]
+    public async Task ClaudeLlmProvider_QueriesUrl_And_ParsesResponse()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"appName\": \"ClaudeApp\", \"modules\": [\"Billing\"], \"database\": \"SQLite\", \"authStrategy\": \"None\", \"target\": \"WebAndApi\"}"
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("https://api.anthropic.com") };
+        var provider = new ClaudeLlmProvider(client, "fake-key", "claude-3");
+        var result = await provider.MapIntentAsync("Build billing system", new[] { "Billing" });
+        Assert.NotNull(result);
+        Assert.Equal("ClaudeApp", result.AppName);
+    }
+
+    [Fact]
+    public async Task GeminiLlmProvider_QueriesUrl_And_ParsesResponse()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "candidates": [
+                {
+                  "content": {
+                    "parts": [
+                      {
+                        "text": "{\"appName\": \"GeminiApp\", \"modules\": [\"Storage\"], \"database\": \"PostgreSQL\", \"authStrategy\": \"JWT\", \"target\": \"WebAndApi\"}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("https://generativelanguage.googleapis.com") };
+        var provider = new GeminiLlmProvider(client, "fake-key", "gemini-1.5");
+        var result = await provider.MapIntentAsync("Build storage app", new[] { "Storage" });
+        Assert.NotNull(result);
+        Assert.Equal("GeminiApp", result.AppName);
+        Assert.Equal("PostgreSQL", result.Database);
+    }
+
+    [Fact]
+    public async Task OpenAiLlmProvider_And_IntentMapper_QueriesUrl_And_ParsesResponse()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "choices": [
+                {
+                  "message": {
+                    "content": "{\"appName\": \"OpenAiApp\", \"modules\": [\"Notifications\"], \"database\": \"SQLite\", \"authStrategy\": \"None\", \"target\": \"WebAndApi\"}"
+                  }
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("https://api.openai.com") };
+        var provider = new OpenAiLlmProvider(client, "fake-key", "gpt-4");
+        
+        // Test provider
+        var result = await provider.MapIntentAsync("Build notify", new[] { "Notifications" });
+        Assert.NotNull(result);
+        Assert.Equal("OpenAiApp", result.AppName);
+
+        // Test refinement
+        var refined = await provider.RefineBlueprintAsync(result, "Change db to PostgreSQL", new[] { "Notifications" });
+        Assert.NotNull(refined);
+
+        // Test mapper wrapper
+        var mapper = new OpenAiIntentMapper(client, "fake-key", "gpt-4o");
+        var mappedBlueprint = await mapper.MapIntentAsync("Build notify", new[] { "Notifications" });
+        Assert.NotNull(mappedBlueprint);
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_MissingKeyFile_ReturnsFalseSignature()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": []}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains(".sig"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(new byte[] { 1 })
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // Mutate public key path to non-existent file
+        var originalPath = OciVaultRepository.PublicKeyPemPath;
+        OciVaultRepository.PublicKeyPemPath = "/nonexistent/cosign-key.pub";
+
+        try
+        {
+            await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
+            {
+                await repo.FetchModuleInMemoryAsync("auth", "latest");
+            });
+        }
+        finally
+        {
+            OciVaultRepository.PublicKeyPemPath = originalPath;
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_ManifestIndexRouting_ResolvesCorrectPlatform()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "test.txt");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("val"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            // Mock OCI Index request returning list of manifests
+            if (uri.Contains("/manifests/latest"))
+            {
+                var indexJson = """
+                {
+                  "manifests": [
+                    {
+                      "digest": "sha256:linux-digest",
+                      "platform": {
+                        "os": "linux",
+                        "architecture": "amd64"
+                      }
+                    }
+                  ]
+                }
+                """;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(indexJson, Encoding.UTF8, "application/vnd.oci.image.index.v1+json")
+                };
+            }
+
+            if (uri.Contains("/manifests/sha256:linux-digest"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+
+            if (uri.Contains("/blobs/sha256:layer-digest"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        var (files, digest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.NotEmpty(files);
+        Assert.True(files.ContainsKey("test.txt"));
+    }
+
+    [Fact]
+    public async Task LocalVaultRepository_FetchNonExistent_ThrowsDirectoryNotFound()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "local_vault_err_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var repo = new LocalVaultRepository(temp);
+            await Assert.ThrowsAsync<DirectoryNotFoundException>(() => repo.FetchTemplateInMemoryAsync("nonexistent"));
+            await Assert.ThrowsAsync<DirectoryNotFoundException>(() => repo.FetchModuleInMemoryAsync("nonexistent", "latest"));
+        }
+        finally
+        {
+            if (Directory.Exists(temp)) Directory.Delete(temp, true);
+        }
+    }
+
+    [Fact]
+    public async Task AnalyticsInjectionPlugin_MissingHtml_SkipsGracefully()
+    {
+        var plugin = new AnalyticsInjectionPlugin();
+        var blueprint = new Blueprint { AppName = "TelemetryApp" };
+
+        var workspace = new System.Collections.Concurrent.ConcurrentDictionary<string, byte[]>();
+        // index.html is missing
+        await plugin.ExecuteInMemoryAsync(workspace, blueprint);
+
+        // Verify empty workspace remains empty
+        Assert.Empty(workspace);
+    }
+
+    [Fact]
+    public async Task LlmProviders_RefinementPromptMapping_Succeeds()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "choices": [
+                {
+                  "message": {
+                    "content": "{\"appName\": \"RefinedApp\", \"modules\": [\"Auth\"], \"database\": \"PostgreSQL\", \"authStrategy\": \"JWT\", \"target\": \"WebAndApi\"}"
+                  }
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:11434") };
+        var provider = new OllamaLlmProvider(client, "llama3");
+        var baseBlueprint = new Blueprint { AppName = "BaseApp" };
+        var refined = await provider.RefineBlueprintAsync(baseBlueprint, "Add Auth and PG", new[] { "Auth" });
+        
+        Assert.NotNull(refined);
+        Assert.Equal("RefinedApp", refined.AppName);
+    }
+
+    [Fact]
+    public void LlmProviderOptions_Properties_GetAndSet()
+    {
+        var opts = new LlmProviderOptions
+        {
+            ApiKey = "api-key",
+            BaseUrl = "http://localhost",
+            Model = "model"
+        };
+
+        Assert.Equal("api-key", opts.ApiKey);
+        Assert.Equal("http://localhost", opts.BaseUrl);
+        Assert.Equal("model", opts.Model);
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_AssembleAsync_InvalidJson_ReturnsFailure()
+    {
+        var mock = new Mock<IVaultRepository>();
+        var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var result = await compiler.AssembleAsync("invalid-json", "job-id", store);
+        Assert.False(result.Success);
+    }
+
+    [Fact]
+    public async Task LlmProviders_ApiFailure_ThrowsException()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("Server Error")
+            };
+        });
+
+        // Test Ollama
+        var ollama = new OllamaLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "llama");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ollama.MapIntentAsync("test", new[] { "A" }));
+
+        // Test Claude
+        var claude = new ClaudeLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => claude.MapIntentAsync("test", new[] { "A" }));
+
+        // Test Gemini
+        var gemini = new GeminiLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => gemini.MapIntentAsync("test", new[] { "A" }));
+
+        // Test OpenAI
+        var openai = new OpenAiLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => openai.MapIntentAsync("test", new[] { "A" }));
+
+        // Test OpenAiIntentMapper
+        var mapper = new OpenAiIntentMapper(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        await Assert.ThrowsAsync<Exception>(() => mapper.MapIntentAsync("test", new[] { "A" }));
+    }
+
+    [Fact]
+    public async Task LocalVaultRepository_MissingVaultDir_ReturnsEmptyList()
+    {
+        var repo = new LocalVaultRepository("/nonexistent/vault_path");
+        var list = await repo.ListModulesAsync();
+        Assert.Empty(list);
+
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(() => repo.FetchTemplateAsync("tpl", "dest"));
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(() => repo.FetchModuleAsync("mod", "1.0", "dest"));
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PushModule_ThrowsNotImplemented()
+    {
+        var client = new HttpClient();
+        var verifier = new Mock<ISignatureVerifier>().Object;
+        var logger = new Mock<ILogger<OciVaultRepository>>().Object;
+        var repo = new OciVaultRepository(client, verifier, logger);
+
+        await Assert.ThrowsAsync<NotImplementedException>(() => repo.PushModuleAsync("src", "name", "1.0"));
+    }
+
+    [Fact]
+    public async Task ClaudeAndGeminiLlmProviders_RefineBlueprint_ParseResponseSuccessfully()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var resJson = """
+            {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"appName\": \"RefinedApp\", \"modules\": [], \"database\": \"SQLite\", \"authStrategy\": \"None\", \"target\": \"WebAndApi\"}"
+                }
+              ],
+              "candidates": [
+                {
+                  "content": {
+                    "parts": [
+                      {
+                        "text": "{\"appName\": \"RefinedApp\", \"modules\": [], \"database\": \"SQLite\", \"authStrategy\": \"None\", \"target\": \"WebAndApi\"}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+            """;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(resJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var baseBlueprint = new Blueprint { AppName = "BaseApp" };
+
+        var claude = new ClaudeLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        var resultClaude = await claude.RefineBlueprintAsync(baseBlueprint, "Add Auth", Enumerable.Empty<string>());
+        Assert.NotNull(resultClaude);
+
+        var gemini = new GeminiLlmProvider(new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5000") }, "key", "model");
+        var resultGemini = await gemini.RefineBlueprintAsync(baseBlueprint, "Add Auth", Enumerable.Empty<string>());
+        Assert.NotNull(resultGemini);
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_DatabaseStitchingBranches_PostgreSQL_And_SQLServer()
+    {
+        // 1. Arrange: setup workspace files for PostgreSQL
+        var mock = new Mock<IVaultRepository>();
+        var frontendFiles = new Dictionary<string, byte[]>
+        {
+            { "src/App.tsx", Encoding.UTF8.GetBytes("// placeholder\n{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}\n{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}") }
+        };
+        var backendFiles = new Dictionary<string, byte[]>
+        {
+            { "Program.cs", Encoding.UTF8.GetBytes("// DATABASE_INJECTION_START\n// DATABASE_INJECTION_END\n// DBSETS_PLACEHOLDER") },
+            { "AppDbContext.cs", Encoding.UTF8.GetBytes("/* INJECT_DBSETS */") },
+            { "dotnet-backend.csproj", Encoding.UTF8.GetBytes("<PackageReference Include=\"Microsoft.EntityFrameworkCore.Sqlite\" Version=\"9.0.0\" />") }
+        };
+
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend"))
+            .ReturnsAsync((frontendFiles, "sha-react"));
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend"))
+            .ReturnsAsync((backendFiles, "sha-dotnet"));
+
+        var compiler = new AssemblyCompiler(mock.Object, new[] { new AnalyticsInjectionPlugin() });
+        
+        // Test PostgreSQL blueprint compilation
+        var blueprintPg = new Blueprint
+        {
+            AppName = "PgApp",
+            Database = "PostgreSQL",
+            Target = "WebAndApi",
+            Modules = new()
+        };
+        var storePg = new LocalDiskOutputStore();
+        var resultPg = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprintPg), "job-pg", storePg);
+        
+        Assert.True(resultPg.Success);
+        // Test SQLServer blueprint compilation
+        var blueprintSql = new Blueprint
+        {
+            AppName = "SqlApp",
+            Database = "SQLServer",
+            Target = "WebAndApi",
+            Modules = new()
+        };
+        var storeSql = new LocalDiskOutputStore();
+        var resultSql = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprintSql), "job-sql", storeSql);
+
+        Assert.True(resultSql.Success);
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_FullStitching_AuthAndItems_Succeeds()
+    {
+        var mock = new Mock<IVaultRepository>();
+        var frontendFiles = new Dictionary<string, byte[]>
+        {
+            { "src/App.tsx", Encoding.UTF8.GetBytes("// placeholder\n{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}\n{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}") }
+        };
+        var backendFiles = new Dictionary<string, byte[]>
+        {
+            { "Program.cs", Encoding.UTF8.GetBytes("// DATABASE_INJECTION_START\n// DATABASE_INJECTION_END\n// DBSETS_PLACEHOLDER") },
+            { "AppDbContext.cs", Encoding.UTF8.GetBytes("/* INJECT_DBSETS */") },
+            { "dotnet-backend.csproj", Encoding.UTF8.GetBytes("<PackageReference Include=\"Microsoft.EntityFrameworkCore.Sqlite\" Version=\"9.0.0\" />") }
+        };
+
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend")).ReturnsAsync((frontendFiles, "sha-react"));
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend")).ReturnsAsync((backendFiles, "sha-dotnet"));
+
+        // Setup Auth module files & manifest
+        var authManifest = "{\"name\":\"Auth\",\"description\":\"\",\"frontend\":{\"nav\":\"<li>AuthNav</li>\",\"views\":\"src/views/LoginView.tsx\",\"imports\":\"import LoginView;\"},\"backend\":{\"controllers\":[\"Controllers/AuthController.cs\"],\"dbSets\":\"public DbSet<User> Users { get; set; }\"}}";
+        var authFiles = new Dictionary<string, byte[]>
+        {
+            { "manifest.json", Encoding.UTF8.GetBytes(authManifest) },
+            { "Controllers/AuthController.cs", Encoding.UTF8.GetBytes("public class AuthController {}") },
+            { "src/views/LoginView.tsx", Encoding.UTF8.GetBytes("const LoginView = () => {}") }
+        };
+        mock.Setup(v => v.FetchModuleInMemoryAsync("auth", "latest")).ReturnsAsync((authFiles, "sha-auth"));
+
+        // Setup Items module files & manifest
+        var itemsManifest = "{\"name\":\"Items\",\"description\":\"\",\"frontend\":{\"nav\":\"<li>ItemsNav</li>\",\"views\":\"src/views/ItemsView.tsx\",\"imports\":\"import ItemsView;\"},\"backend\":{\"controllers\":[\"Controllers/ItemsController.cs\"],\"dbSets\":\"public DbSet<Item> Items { get; set; }\"}}";
+        var itemsFiles = new Dictionary<string, byte[]>
+        {
+            { "manifest.json", Encoding.UTF8.GetBytes(itemsManifest) },
+            { "Controllers/ItemsController.cs", Encoding.UTF8.GetBytes("public class ItemsController {}") },
+            { "src/views/ItemsView.tsx", Encoding.UTF8.GetBytes("const ItemsView = () => {}") }
+        };
+        mock.Setup(v => v.FetchModuleInMemoryAsync("items", "latest")).ReturnsAsync((itemsFiles, "sha-items"));
+
+        // Setup custom module
+        var customManifest = "{\"name\":\"Custom\",\"description\":\"\",\"frontend\":{\"nav\":\"<li>CustomNav</li>\",\"views\":\"src/views/CustomView.tsx\",\"imports\":\"\"},\"backend\":{}}";
+        var customFiles = new Dictionary<string, byte[]>
+        {
+            { "manifest.json", Encoding.UTF8.GetBytes(customManifest) },
+            { "src/views/CustomView.tsx", Encoding.UTF8.GetBytes("const CustomView = () => {}") }
+        };
+        mock.Setup(v => v.FetchModuleInMemoryAsync("custom", "latest")).ReturnsAsync((customFiles, "sha-custom"));
+
+        var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
+        var blueprint = new Blueprint
+        {
+            AppName = "App",
+            Database = "SQLite",
+            Target = "WebAndApi",
+            Modules = new() { "auth", "items", "custom" }
+        };
+
+        var store = new LocalDiskOutputStore();
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-full-stich", store, onLog: msg => {});
+
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_LegacyFetchModuleAndSignatureExceptions_Succeeds()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "main.js");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("alert(1);"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            // Return OCI Index manifest
+            if (uri.Contains("/manifests/latest"))
+            {
+                var indexJson = """
+                {
+                  "manifests": [
+                    {
+                      "digest": "sha256:target-digest",
+                      "platform": {
+                        "os": "darwin",
+                        "architecture": "arm64"
+                      }
+                    }
+                  ]
+                }
+                """;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(indexJson, Encoding.UTF8, "application/vnd.oci.image.index.v1+json")
+                };
+            }
+
+            if (uri.Contains("/manifests/sha256:target-digest"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+
+            if (uri.Contains("/blobs/"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+            if (uri.Contains(".sig"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent("invalid-signature")
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        
+        // Cause signature verification to throw exception to test OciVaultRepository verify signature catch block
+        verifierMock.Setup(v => v.VerifySignature(It.IsAny<byte[]>(), It.IsAny<byte[]>(), It.IsAny<string>()))
+            .Throws(new InvalidOperationException("Crypto Error"));
+
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "oci_module_legacy_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // Should throw SecurityException because VerifySignature throws exception (caught and fails closed)
+            await Assert.ThrowsAsync<System.Security.SecurityException>(() =>
+                repo.FetchModuleAsync("my-module", "latest", tempOut));
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_PluginAndStoreErrors_CaughtAndHandled()
+    {
+        var mock = new Mock<IVaultRepository>();
+        var frontendFiles = new Dictionary<string, byte[]>
+        {
+            { "src/App.tsx", Encoding.UTF8.GetBytes("// placeholder\n{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}\n{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}") }
+        };
+        var backendFiles = new Dictionary<string, byte[]>
+        {
+            { "Program.cs", Encoding.UTF8.GetBytes("// DATABASE_INJECTION_START\n// DATABASE_INJECTION_END\n// DBSETS_PLACEHOLDER") },
+            { "AppDbContext.cs", Encoding.UTF8.GetBytes("/* INJECT_DBSETS */") },
+            { "dotnet-backend.csproj", Encoding.UTF8.GetBytes("<PackageReference Include=\"Microsoft.EntityFrameworkCore.Sqlite\" Version=\"9.0.0\" />") }
+        };
+
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend")).ReturnsAsync((frontendFiles, "sha-react"));
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend")).ReturnsAsync((backendFiles, "sha-dotnet"));
+
+        // Mock plugin that throws exception
+        var badPluginMock = new Mock<IAssemblyPlugin>();
+        badPluginMock.Setup(p => p.Name).Returns("BadPlugin");
+        badPluginMock.Setup(p => p.ExecuteInMemoryAsync(It.IsAny<System.Collections.Concurrent.ConcurrentDictionary<string, byte[]>>(), It.IsAny<Blueprint>(), It.IsAny<Action<string>>()))
+            .ThrowsAsync(new InvalidOperationException("Plugin crashed"));
+
+        var compiler = new AssemblyCompiler(mock.Object, new[] { badPluginMock.Object });
+        var blueprint = new Blueprint
+        {
+            AppName = "App",
+            Database = "SQLite",
+            Target = "WebAndApi",
+            Modules = new()
+        };
+
+        var store = new LocalDiskOutputStore();
+        // Should compile successfully despite the plugin crashing (graceful handling)
+        var result = await compiler.AssembleAsync(System.Text.Json.JsonSerializer.Serialize(blueprint), "job-plugin-err", store, onLog: msg => {});
+        Assert.True(result.Success);
+
+        // Test output store error propagation
+        var badStoreMock = new Mock<IOutputStore>();
+        badStoreMock.Setup(s => s.StoreArtifactAsync(It.IsAny<string>(), It.IsAny<Stream>()))
+            .ThrowsAsync(new IOException("Disk Full"));
+
+        var compilerStoreErr = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
+        await Assert.ThrowsAsync<IOException>(() =>
+            compilerStoreErr.AssembleAsync(System.Text.Json.JsonSerializer.Serialize(blueprint), "job-store-err", badStoreMock.Object));
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_ModuleFetchAndManifestDeserializationExceptions_Handled()
+    {
+        var mock = new Mock<IVaultRepository>();
+        var frontendFiles = new Dictionary<string, byte[]> { { "src/App.tsx", Encoding.UTF8.GetBytes("") } };
+        var backendFiles = new Dictionary<string, byte[]> { { "Program.cs", Encoding.UTF8.GetBytes("") } };
+
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend")).ReturnsAsync((frontendFiles, "sha-react"));
+        mock.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend")).ReturnsAsync((backendFiles, "sha-dotnet"));
+
+        // FetchModuleInMemory throws an exception to trigger ProcessModuleInMemoryAsync catch block
+        mock.Setup(v => v.FetchModuleInMemoryAsync("auth", "latest"))
+            .ThrowsAsync(new InvalidOperationException("Registry offline"));
+
+        var compiler = new AssemblyCompiler(mock.Object, Enumerable.Empty<IAssemblyPlugin>());
+        var blueprint = new Blueprint
+        {
+            AppName = "App",
+            Database = "SQLite",
+            Target = "WebAndApi",
+            Modules = new() { "auth" }
+        };
+
+        var store = new LocalDiskOutputStore();
+        // Should compile successfully (auth module is skipped, failsafe compilation)
+        var result = await compiler.AssembleAsync(System.Text.Json.JsonSerializer.Serialize(blueprint), "job-mod-err", store);
+        Assert.True(result.Success);
+
+        // Test deserialization failure of manifest
+        var mockBadManifest = new Mock<IVaultRepository>();
+        mockBadManifest.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend")).ReturnsAsync((frontendFiles, "sha-react"));
+        mockBadManifest.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend")).ReturnsAsync((backendFiles, "sha-dotnet"));
+        mockBadManifest.Setup(v => v.FetchModuleInMemoryAsync("auth", "latest"))
+            .ReturnsAsync((new Dictionary<string, byte[]> { { "manifest.json", Encoding.UTF8.GetBytes("invalid-manifest-json") } }, "sha-mod"));
+
+        var compilerBadManifest = new AssemblyCompiler(mockBadManifest.Object, Enumerable.Empty<IAssemblyPlugin>());
+        await Assert.ThrowsAsync<System.Text.Json.JsonException>(() =>
+            compilerBadManifest.AssembleAsync(System.Text.Json.JsonSerializer.Serialize(blueprint), "job-manifest-err", store));
+
+        // Test missing manifest.json skips module
+        var mockMissingManifest = new Mock<IVaultRepository>();
+        mockMissingManifest.Setup(v => v.FetchTemplateInMemoryAsync("react-frontend")).ReturnsAsync((frontendFiles, "sha-react"));
+        mockMissingManifest.Setup(v => v.FetchTemplateInMemoryAsync("dotnet-backend")).ReturnsAsync((backendFiles, "sha-dotnet"));
+        // Module workspace empty (no manifest.json)
+        mockMissingManifest.Setup(v => v.FetchModuleInMemoryAsync("auth", "latest"))
+            .ReturnsAsync((new Dictionary<string, byte[]>(), "sha-mod"));
+
+        var compilerMissingManifest = new AssemblyCompiler(mockMissingManifest.Object, Enumerable.Empty<IAssemblyPlugin>());
+        var resultMissing = await compilerMissingManifest.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-missing-manifest", store);
+        Assert.True(resultMissing.Success);
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_VerifyManifestSignature_HandlesExceptionsGracefully()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": []}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains(".sig"))
+            {
+                // Return invalid signature byte stream to trigger verification checks
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(new byte[] { 1 })
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        // Force cryptographic signature check to throw an exception
+        verifierMock.Setup(v => v.VerifySignature(It.IsAny<byte[]>(), It.IsAny<byte[]>(), It.IsAny<string>()))
+            .Throws(new InvalidOperationException("Signature payload corrupt"));
+
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
+        {
+            await repo.FetchModuleInMemoryAsync("auth", "latest");
+        });
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PullArtifactAsync_IndexMatches_NoLinuxFallback()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "test.txt");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("val"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            // Return Index manifest containing ONLY windows platform (tests no linux match fallback path)
+            if (uri.Contains("/manifests/latest"))
+            {
+                var indexJson = """
+                {
+                  "manifests": [
+                    {
+                      "digest": "sha256:win-digest",
+                      "platform": {
+                        "os": "windows",
+                        "architecture": "amd64"
+                      }
+                    }
+                  ]
+                }
+                """;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(indexJson, Encoding.UTF8, "application/vnd.oci.image.index.v1+json")
+                };
+            }
+
+            if (uri.Contains("/manifests/sha256:win-digest"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+
+            if (uri.Contains("/blobs/sha256:layer-digest"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        var (files, digest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.NotEmpty(files);
+        Assert.True(files.ContainsKey("test.txt"));
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_template_index_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var result = await repo.FetchTemplateAsync("react-frontend", tempOut);
+            Assert.True(Directory.Exists(result.targetDirectory));
+            Assert.True(File.Exists(Path.Combine(result.targetDirectory, "test.txt")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PullArtifactAsync_IndexMatches_LinuxPlatform_Succeeds()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "linux.txt");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("linux-val"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            // Return Index manifest containing a LINUX platform entry to cover lines 109-111 and 188-190
+            if (uri.Contains("/manifests/latest"))
+            {
+                var indexJson = """
+                {
+                  "manifests": [
+                    {
+                      "digest": "sha256:linux-digest",
+                      "platform": {
+                        "os": "linux",
+                        "architecture": "amd64"
+                      }
+                    }
+                  ]
+                }
+                """;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(indexJson, Encoding.UTF8, "application/vnd.oci.image.index.v1+json")
+                };
+            }
+
+            if (uri.Contains("/manifests/sha256:linux-digest"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+
+            if (uri.Contains("/blobs/sha256:layer-digest"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        var (files, digest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.NotEmpty(files);
+        Assert.True(files.ContainsKey("linux.txt"));
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_linux_index_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var result = await repo.FetchTemplateAsync("react-frontend", tempOut);
+            Assert.True(Directory.Exists(result.targetDirectory));
+            Assert.True(File.Exists(Path.Combine(result.targetDirectory, "linux.txt")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PullArtifact_LayerHttpFailure_ThrowsException()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains("/blobs/"))
+            {
+                // Return 500 on blob download to cover line 124
+                return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_blob_err_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Assert.ThrowsAsync<System.Net.Http.HttpRequestException>(async () =>
+            {
+                await repo.FetchTemplateAsync("react-frontend", tempOut);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_LegacyFetchModuleAndVerifySignature_Success()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "manifest.json");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("{}"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            if (uri.Contains("/blobs/"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+            if (uri.Contains(".sig"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(new byte[] { 1, 2, 3 })
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        verifierMock.Setup(v => v.VerifySignature(It.IsAny<byte[]>(), It.IsAny<byte[]>(), It.IsAny<string>()))
+            .Returns(true);
+
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // Fetch template in-memory
+        var (tFiles, tDigest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.NotEmpty(tFiles);
+
+        // Fetch module in-memory (signature check passes)
+        var (mFiles, mDigest) = await repo.FetchModuleInMemoryAsync("auth", "latest");
+        Assert.NotEmpty(mFiles);
+
+        // Fetch module legacy path
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_module_success_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var result = await repo.FetchModuleAsync("auth", "latest", tempOut);
+            Assert.True(Directory.Exists(result.targetDirectory));
+            Assert.True(File.Exists(Path.Combine(result.targetDirectory, "manifest.json")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_VerifyManifestSignature_MissingSignatureFile_ReturnsFalse()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains(".sig"))
+            {
+                // Return 404 to cover lines 248-249
+                return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+            }
+            if (uri.Contains("/manifests/"))
+            {
+                var manifestJson = "{\"schemaVersion\": 2, \"layers\": []}";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
+        {
+            await repo.FetchModuleInMemoryAsync("auth", "latest");
+        });
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PullArtifact_HttpFailure_ThrowsException()
+    {
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            // Return 500 Internal Server Error to cover manifest failures (lines 94-95 and 174-175)
+            return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        await Assert.ThrowsAsync<Exception>(async () =>
+        {
+            await repo.FetchTemplateInMemoryAsync("react-frontend");
+        });
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_module_err_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Assert.ThrowsAsync<Exception>(async () =>
+            {
+                await repo.FetchModuleAsync("auth", "latest", tempOut);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task OciVaultRepository_PullArtifact_MissingDigestHeaders_Fallback()
+    {
+        using var layerMs = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(layerMs, System.IO.Compression.CompressionMode.Compress, true))
+        using (var writer = new System.Formats.Tar.TarWriter(gzip))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "manifest.json");
+            entry.DataStream = new MemoryStream(Encoding.UTF8.GetBytes("{}"));
+            writer.WriteEntry(entry);
+        }
+        var layerBytes = layerMs.ToArray();
+
+        var mockHandler = new MockHttpMessageHandler(async req =>
+        {
+            var uri = req.RequestUri?.ToString() ?? "";
+            if (uri.Contains("/manifests/"))
+            {
+                // Returns OCI manifest containing a config object with digest to cover config fallback branches
+                var manifestJson = "{\"schemaVersion\": 2, \"config\": {\"digest\": \"sha256:config-digest\"}, \"layers\": [{\"digest\": \"sha256:layer-digest\"}]}";
+                var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(manifestJson, Encoding.UTF8, "application/vnd.oci.image.manifest.v1+json")
+                };
+                // Intentionally omit OCI digest headers to trigger lines 127-129 and 207-209 fallback checks
+                return response;
+            }
+            if (uri.Contains("/blobs/"))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(layerBytes)
+                };
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(mockHandler) { BaseAddress = new Uri("http://localhost:5001") };
+        var verifierMock = new Mock<ISignatureVerifier>();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        var repo = new OciVaultRepository(client, verifierMock.Object, logger);
+
+        // Fetch template (passes because signature checking is bypassed for templates)
+        var (tFiles, tDigest) = await repo.FetchTemplateInMemoryAsync("react-frontend");
+        Assert.NotEmpty(tFiles);
+        Assert.Equal("sha256:config-digest", tDigest);
+
+        var tempOut = Path.Combine(Path.GetTempPath(), "legacy_template_digest_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var result = await repo.FetchTemplateAsync("react-frontend", tempOut);
+            Assert.True(Directory.Exists(result.targetDirectory));
+            Assert.Equal("sha256:config-digest", result.digest);
+        }
+        finally
+        {
+            if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true);
+        }
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_DeveloperPortal_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "DeveloperPortal",
+            Target = "FullStack",
+            Database = "SQLite",
+            Modules = new List<string> { "GithubAuth", "Analytics", "Settings" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-devportal", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/githubauth", result.SbomJson);
+        Assert.Contains("modules/analytics", result.SbomJson);
+        Assert.Contains("modules/settings", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_EnterpriseApp_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "EnterpriseApp",
+            Target = "FullStack",
+            Database = "SQLServer",
+            Modules = new List<string> { "EntraIdAuth", "Notifications", "Storage", "Settings" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-enterprise", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/entraidauth", result.SbomJson);
+        Assert.Contains("modules/notifications", result.SbomJson);
+        Assert.Contains("modules/storage", result.SbomJson);
+        Assert.Contains("modules/settings", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_SaaSPlatform_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "SaaSPlatform",
+            Target = "FullStack",
+            Database = "PostgreSQL",
+            Modules = new List<string> { "OktaAuth", "Billing", "Analytics", "Comments" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-saas", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/oktaauth", result.SbomJson);
+        Assert.Contains("modules/billing", result.SbomJson);
+        Assert.Contains("modules/analytics", result.SbomJson);
+        Assert.Contains("modules/comments", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_ClassicStore_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "ClassicStore",
+            Target = "FullStack",
+            Database = "SQLite",
+            Modules = new List<string> { "Auth", "Items", "Billing", "Notifications" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-store", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/auth", result.SbomJson);
+        Assert.Contains("modules/items", result.SbomJson);
+        Assert.Contains("modules/billing", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_ProjectManager_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "ProjectManager",
+            Target = "FullStack",
+            Database = "SQLite",
+            Modules = new List<string> { "Tasks", "Feedback", "Chat", "Cart" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-projectmanager", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/tasks", result.SbomJson);
+        Assert.Contains("modules/feedback", result.SbomJson);
+        Assert.Contains("modules/chat", result.SbomJson);
+        Assert.Contains("modules/cart", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task E2E_CompileApp_MasterDashboard_Succeeds()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>());
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "MasterDashboard",
+            Target = "FullStack",
+            Database = "PostgreSQL",
+            Modules = new List<string> 
+            { 
+                "Auth", "OktaAuth", "EntraIdAuth", "GithubAuth", 
+                "Tasks", "Feedback", "Chat", "Cart", 
+                "Analytics", "Billing", "Comments", "Notifications", "Settings", "Storage" 
+            }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-masterdashboard", store);
+
+        Assert.True(result.Success);
+        Assert.Contains("modules/auth", result.SbomJson);
+        Assert.Contains("modules/oktaauth", result.SbomJson);
+        Assert.Contains("modules/entraidauth", result.SbomJson);
+        Assert.Contains("modules/githubauth", result.SbomJson);
+        Assert.Contains("modules/tasks", result.SbomJson);
+        Assert.Contains("modules/feedback", result.SbomJson);
+        Assert.Contains("modules/chat", result.SbomJson);
+        Assert.Contains("modules/cart", result.SbomJson);
+        Assert.Contains("modules/analytics", result.SbomJson);
+        Assert.Contains("modules/billing", result.SbomJson);
+        Assert.Contains("modules/comments", result.SbomJson);
+        Assert.Contains("modules/notifications", result.SbomJson);
+        Assert.Contains("modules/settings", result.SbomJson);
+        Assert.Contains("modules/storage", result.SbomJson);
+    }
+
+    private LocalVaultRepository BuildRealLocalRepository()
+    {
+        var cwd = Directory.GetCurrentDirectory();
+        var dir = new DirectoryInfo(cwd);
+        while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "vault")))
+        {
+            dir = dir.Parent;
+        }
+        if (dir == null)
+        {
+            throw new DirectoryNotFoundException("Could not find workspace root with 'vault' folder.");
+        }
+        return new LocalVaultRepository(dir.FullName);
     }
 }
