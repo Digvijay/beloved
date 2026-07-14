@@ -224,9 +224,8 @@ public class AssemblyCompiler
             if (workspace.TryGetValue(backendAppDbContextPath, out var dbContextBytes))
             {
                 var originalDb = Encoding.UTF8.GetString(dbContextBytes);
-                var sb = new StringBuilder(originalDb);
-                sb.Replace("/* INJECT_DBSETS */", string.Join("\n    ", dbSetInjections.ToList()));
-                workspace[backendAppDbContextPath] = Encoding.UTF8.GetBytes(sb.ToString());
+                var updatedDb = RoslynDbContextMerger.MergeDbSets(originalDb, dbSetInjections.ToArray());
+                workspace[backendAppDbContextPath] = Encoding.UTF8.GetBytes(updatedDb);
             }
 
             // 4. Stitch Frontend App.tsx

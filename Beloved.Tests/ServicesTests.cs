@@ -2556,6 +2556,23 @@ public class LlmProviderTests
         Assert.True(result.Success);
     }
 
+    [Fact]
+    public void RoslynDbContextMerger_InjectsDbSetsCorrectly()
+    {
+        var originalCode = 
+            """
+            using Microsoft.EntityFrameworkCore;
+            public class AppDbContext : DbContext
+            {
+                public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+            }
+            """;
+        var dbSets = new[] { "public DbSet<UserTask> UserTasks { get; set; } = null!;" };
+        var updated = RoslynDbContextMerger.MergeDbSets(originalCode, dbSets);
+
+        Assert.Contains("public DbSet<UserTask> UserTasks { get; set; }", updated);
+    }
+
     private LocalVaultRepository BuildRealLocalRepository()
     {
         var cwd = Directory.GetCurrentDirectory();
