@@ -133,4 +133,67 @@ public sealed class ClaudeLlmProvider : ILlmProvider
 
         return JsonSerializer.Deserialize(aiContent, AssemblyJsonContext.Default.Blueprint);
     }
+
+    public async Task<string> StitchFileAsync(string originalContent, string mergeInstruction, string contextHint = "")
+    {
+        var systemPrompt = 
+            """
+            You are a deterministic code merging assistant.
+            You must read a source file and apply the given merge instruction.
+            You MUST output ONLY the final modified source file code.
+            Do not include markdown code blocks (e.g. ```csharp) or explanations.
+            """;
+
+        var userPrompt = $"Source Code:\n{originalContent}\n\nMerge Instruction:\n{mergeInstruction}\n\nContext Hint:\n{contextHint}\n\nFinal Output:";
+
+        var requestBody = new
+        {
+            model = _modelName,
+            max_tokens = 4000,
+            system = systemPrompt,
+            messages = new[]
+            {
+                new { role = "user", content = userPrompt }
+            },
+            temperature = 0.0
+        };
+
+        var jsonContent = new StringContent(
+            JsonSerializer.Serialize(requestBody, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+            Encoding.UTF8,
+            "application/json");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/messages")
+        {
+            Content = jsonContent
+        };
+
+        var response = await _httpClient.SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException($"Claude StitchFile call failed: {response.StatusCode} — {error}");
+        }
+
+        var responseString = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(responseString);
+        var aiContent = doc.RootElement
+            .GetProperty("content")[0]
+            .GetProperty("text")
+            .GetString();
+
+        if (string.IsNullOrWhiteSpace(aiContent)) return originalContent;
+
+        var result = aiContent.Trim();
+        if (result.StartsWith("```"))
+        {
+            var firstNewLine = result.IndexOf('\n');
+            var lastBackticks = result.LastIndexOf("```");
+            if (firstNewLine > 0 && lastBackticks > firstNewLine)
+            {
+                result = result.Substring(firstNewLine + 1, lastBackticks - firstNewLine - 1).Trim();
+            }
+        }
+        return result;
+    }
 }

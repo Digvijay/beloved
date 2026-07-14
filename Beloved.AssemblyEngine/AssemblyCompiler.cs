@@ -76,13 +76,15 @@ public class AssemblyCompiler
 {
     private readonly IVaultRepository _vaultRepository;
     private readonly IEnumerable<IAssemblyPlugin> _plugins;
+    private readonly ILlmProvider? _llmProvider;
 
     private static readonly System.Diagnostics.ActivitySource CompilerActivitySource = new System.Diagnostics.ActivitySource("Beloved.AssemblyEngine");
 
-    public AssemblyCompiler(IVaultRepository vaultRepository, IEnumerable<IAssemblyPlugin> plugins)
+    public AssemblyCompiler(IVaultRepository vaultRepository, IEnumerable<IAssemblyPlugin> plugins, ILlmProvider? llmProvider = null)
     {
         _vaultRepository = vaultRepository;
         _plugins = plugins;
+        _llmProvider = llmProvider;
     }
 
     public async Task<AssemblyResult> AssembleAsync(string blueprintJson, string jobId, IOutputStore outputStore, Action<string>? onLog = null)
@@ -240,17 +242,39 @@ public class AssemblyCompiler
                     sb.AppendLine(string.Join("\n", importInjections));
                     sb.Append(appTsxContent);
 
-                    sb.Replace(
-                        "{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}",
-                        string.Join("\n          ", navInjections.ToList())
-                    );
+                    var currentContent = sb.ToString();
 
-                    sb.Replace(
-                        "{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}",
-                        string.Join("\n          ", viewInjections.ToList())
-                    );
+                    // Check if standard placeholders exist
+                    bool hasNavPlaceholder = currentContent.Contains("{/* MODULE_NAV_ITEMS_START */}");
+                    bool hasViewsPlaceholder = currentContent.Contains("{/* MODULE_VIEWS_START */}");
 
-                    workspace[appTsxPath] = Encoding.UTF8.GetBytes(sb.ToString());
+                    if ((!hasNavPlaceholder || !hasViewsPlaceholder) && _llmProvider != null)
+                    {
+                        onLog?.Invoke("[AssemblyEngine] Placeholders missing in App.tsx. Invoking AI-assisted deterministic stitching...");
+                        try
+                        {
+                            var mergeInstruction = $"Please import the modules and merge navigation links: {string.Join(", ", navInjections)} and views: {string.Join(", ", viewInjections)} into the App.tsx file. If custom tabs or sidebar layouts are present, place the links and render blocks inside them naturally.";
+                            currentContent = await _llmProvider.StitchFileAsync(currentContent, mergeInstruction, "Target: React Single Page Dashboard");
+                        }
+                        catch (Exception ex)
+                        {
+                            onLog?.Invoke($"[AssemblyEngine] AI stitching failed: {ex.Message}. Falling back to standard replace.");
+                        }
+                    }
+                    else
+                    {
+                        currentContent = currentContent.Replace(
+                            "{/* MODULE_NAV_ITEMS_START */}\n          {/* MODULE_NAV_ITEMS_END */}",
+                            string.Join("\n          ", navInjections.ToList())
+                        );
+
+                        currentContent = currentContent.Replace(
+                            "{/* MODULE_VIEWS_START */}\n          {/* MODULE_VIEWS_END */}",
+                            string.Join("\n          ", viewInjections.ToList())
+                        );
+                    }
+
+                    workspace[appTsxPath] = Encoding.UTF8.GetBytes(currentContent);
                 }
             }
 

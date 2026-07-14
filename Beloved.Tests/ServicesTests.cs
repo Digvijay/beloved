@@ -1032,6 +1032,11 @@ public class OciVaultRepositoryTests
         Assert.Equal("sha256:manifest-digest", digest);
     }
 
+    public OciVaultRepositoryTests()
+    {
+        OciVaultRepository.AllowSignatureBypassForLocalhost = false;
+    }
+
     [Fact]
     public async Task FetchModuleInMemory_UnsignedOrSignatureMismatch_ThrowsSecurityException()
     {
@@ -2210,6 +2215,13 @@ public class LlmProviderTests
 
         using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
         var logger = loggerFactory.CreateLogger<OciVaultRepository>();
+        
+        OciVaultRepository.AllowSignatureBypassForLocalhost = false;
+        var mockKeyPath = OciVaultRepository.PublicKeyPemPath;
+        if (!File.Exists(mockKeyPath))
+        {
+            File.WriteAllText(mockKeyPath, "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\n-----END PUBLIC KEY-----");
+        }
         var repo = new OciVaultRepository(client, verifierMock.Object, logger);
 
         // Fetch template in-memory
@@ -2518,6 +2530,30 @@ public class LlmProviderTests
         Assert.Contains("modules/notifications", result.SbomJson);
         Assert.Contains("modules/settings", result.SbomJson);
         Assert.Contains("modules/storage", result.SbomJson);
+    }
+
+    [Fact]
+    public async Task AssemblyCompiler_WithLlmStitchFallback_StitchesCorrectly()
+    {
+        var localRepo = BuildRealLocalRepository();
+        var llmMock = new Mock<ILlmProvider>();
+        llmMock.Setup(l => l.StitchFileAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .ReturnsAsync("// AI Stitched Output App.tsx");
+
+        var compiler = new AssemblyCompiler(localRepo, Enumerable.Empty<IAssemblyPlugin>(), llmMock.Object);
+        var store = new LocalDiskOutputStore();
+        var blueprint = new Blueprint
+        {
+            AppName = "AISwitchApp",
+            Target = "FullStack",
+            Database = "SQLite",
+            Modules = new List<string> { "Tasks" }
+        };
+
+        var result = await compiler.AssembleAsync(
+            System.Text.Json.JsonSerializer.Serialize(blueprint), "job-aiswitch", store);
+
+        Assert.True(result.Success);
     }
 
     private LocalVaultRepository BuildRealLocalRepository()

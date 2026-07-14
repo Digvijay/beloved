@@ -28,6 +28,8 @@
 
 - [How it works](#how-it-works)
 - [Architecture](#architecture)
+- [E2E Verification Walkthrough](./docs/walkthrough.md)
+- [Platform Stitching Roadmap](./docs/ROADMAP.md)
 - [Quick start](#quick-start)
 - [Vault modules](#vault-modules)
 - [Kubernetes deployment](#kubernetes-deployment)
