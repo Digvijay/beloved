@@ -252,10 +252,30 @@ public class AssemblyCompiler
                     if ((!hasNavPlaceholder || !hasViewsPlaceholder) && _llmProvider != null)
                     {
                         onLog?.Invoke("[AssemblyEngine] Placeholders missing in App.tsx. Invoking AI-assisted deterministic stitching...");
+                        
+                        // Extract styling context from index.css for Phase 4 Dynamic Theme Adaptation
+                        string styleContext = "Vanilla CSS styling";
+                        var cssPath = "frontend/src/index.css";
+                        if (!workspace.ContainsKey(cssPath)) cssPath = "frontend/index.css";
+                        if (workspace.TryGetValue(cssPath, out var cssBytes))
+                        {
+                            var cssContent = Encoding.UTF8.GetString(cssBytes);
+                            // Capture first few CSS root variables or layout themes to inform styling context
+                            if (cssContent.Contains(":root"))
+                            {
+                                var rootIdx = cssContent.IndexOf(":root");
+                                var endIdx = cssContent.IndexOf('}', rootIdx);
+                                if (rootIdx >= 0 && endIdx > rootIdx)
+                                {
+                                    styleContext = cssContent.Substring(rootIdx, endIdx - rootIdx + 1);
+                                }
+                            }
+                        }
+
                         try
                         {
-                            var mergeInstruction = $"Please import the modules and merge navigation links: {string.Join(", ", navInjections)} and views: {string.Join(", ", viewInjections)} into the App.tsx file. If custom tabs or sidebar layouts are present, place the links and render blocks inside them naturally.";
-                            currentContent = await _llmProvider.StitchFileAsync(currentContent, mergeInstruction, "Target: React Single Page Dashboard");
+                            var mergeInstruction = $"Please import the modules and merge navigation links: {string.Join(", ", navInjections)} and views: {string.Join(", ", viewInjections)} into the App.tsx file. If custom tabs or sidebar layouts are present, place the links and render blocks inside them naturally. Use styles matching the global theme values:\n{styleContext}";
+                            currentContent = await _llmProvider.StitchFileAsync(currentContent, mergeInstruction, "Target: React Single Page Dashboard with styling alignment");
                         }
                         catch (Exception ex)
                         {
