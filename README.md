@@ -66,15 +66,17 @@ graph TD
 
     subgraph "Assembly Engine  ·  C# library"
         OCI["OCI Vault Repository\nFetch + RSA verify"]
-        COMP["Assembly Compiler\nParallel module fan-out"]
-        PLUG["Plugin Pipeline\nAnalytics · Auth · Custom"]
+        DAG["DAG dependency graph\nTopological sorting"]
+        COMP["Assembly Compiler\nRoslyn AST DbSets merge"]
+        PLUG["Plugin Pipeline\nTheme extraction & plugins"]
+        SAND["Build Sandbox\nLocal compiler verification"]
     end
 
-    OUT["Artifact ZIP + SBOM"]
+    OUT["Artifact ZIP + SBOM\nGateway YARP config"]
 
     CLI -->|"POST /api/assemble"| GW
     GW --> IQ --> WK
-    WK --> OCI --> COMP --> PLUG --> OUT
+    WK --> OCI --> DAG --> COMP --> PLUG --> SAND --> OUT
     WK -.->|"SignalR live logs"| CLI
 ```
 
