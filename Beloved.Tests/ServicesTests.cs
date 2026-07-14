@@ -2589,10 +2589,13 @@ public class LlmProviderTests
     }
 
     [Fact]
-    public void BuildSandbox_GeneratesCorrectYarpConfig()
+    public void BuildSandbox_GeneratesCorrectYarpConfig_AndVerifiesBuild()
     {
         var yarp = BuildSandbox.GenerateYarpConfig(new[] { "Auth" });
         Assert.Contains("route-auth", yarp);
+
+        var result = BuildSandbox.VerifyBuild("/invalid/path");
+        Assert.False(result);
     }
 
     private LocalVaultRepository BuildRealLocalRepository()

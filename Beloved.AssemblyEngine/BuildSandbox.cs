@@ -7,9 +7,33 @@ public class BuildSandbox
 {
     public static bool VerifyBuild(string appPath)
     {
-        // Sandbox mock validation for production preview and build validation safety
-        // In full execution, this triggers esbuild-wasm / dotnet build isolates.
-        return true;
+        if (string.IsNullOrWhiteSpace(appPath) || !Directory.Exists(appPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var info = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = "build",
+                WorkingDirectory = appPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+
+            using var process = System.Diagnostics.Process.Start(info);
+            if (process == null) return false;
+
+            process.WaitForExit();
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static string GenerateYarpConfig(string[] resolvedModules)
