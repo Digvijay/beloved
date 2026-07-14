@@ -2573,6 +2573,28 @@ public class LlmProviderTests
         Assert.Contains("public DbSet<UserTask> UserTasks { get; set; }", updated);
     }
 
+    [Fact]
+    public void DependencyResolver_ResolvesModulesTopologically()
+    {
+        var modules = new[] { "Billing", "Cart", "Auth" };
+        var dependencyMap = new Dictionary<string, List<string>>
+        {
+            { "Billing", new List<string> { "Cart" } },
+            { "Cart", new List<string> { "Auth" } }
+        };
+
+        var resolved = DependencyResolver.Resolve(modules, dependencyMap);
+
+        Assert.Equal(new[] { "Auth", "Cart", "Billing" }, resolved);
+    }
+
+    [Fact]
+    public void BuildSandbox_GeneratesCorrectYarpConfig()
+    {
+        var yarp = BuildSandbox.GenerateYarpConfig(new[] { "Auth" });
+        Assert.Contains("route-auth", yarp);
+    }
+
     private LocalVaultRepository BuildRealLocalRepository()
     {
         var cwd = Directory.GetCurrentDirectory();

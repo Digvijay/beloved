@@ -155,15 +155,31 @@ public class AssemblyCompiler
 
         try
         {
+            // Resolve DAG module dependencies
+            var dependencyMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Billing", new List<string> { "Cart" } },
+                { "Cart", new List<string> { "Auth" } },
+                { "Comments", new List<string> { "Auth" } },
+                { "Tasks", new List<string> { "Auth" } }
+            };
+
+            var sortedModules = DependencyResolver.Resolve(blueprint.Modules, dependencyMap);
+
             // 2. Fetch and process ALL modules concurrently in-memory
-            onLog?.Invoke($"[In-Memory] Fetching {blueprint.Modules.Count} module(s) from Vault in parallel...");
-            await Task.WhenAll(blueprint.Modules.Select(modName =>
+            onLog?.Invoke($"[In-Memory] Resolving DAG order: {string.Join(" -> ", sortedModules)}");
+            onLog?.Invoke($"[In-Memory] Fetching {sortedModules.Count} resolved module(s) from Vault in parallel...");
+            await Task.WhenAll(sortedModules.Select(modName =>
                 ProcessModuleInMemoryAsync(
                     modName, isApiOnly, workspace,
                     navInjections, viewInjections, importInjections, dbSetInjections, sbomEntries,
                     onLog)));
 
             foreach (var entry in sbomEntries) sbom.Components.Add(entry);
+            
+            // Add dynamic YARP API Gateway stitched configuration to backend workspace
+            var yarpConfig = BuildSandbox.GenerateYarpConfig(sortedModules.ToArray());
+            workspace["backend/yarp-config.yaml"] = Encoding.UTF8.GetBytes(yarpConfig);
             
             onLog?.Invoke("[In-Memory] Stitching module definitions into core engine...");
             
