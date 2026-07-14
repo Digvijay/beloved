@@ -8,6 +8,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace Beloved.AssemblyEngine;
 
@@ -291,6 +293,23 @@ public class AssemblyCompiler
                 catch (Exception ex)
                 {
                     onLog?.Invoke($"[Plugin Error] Failed to execute {plugin.Name} in-memory: {ex.Message}");
+                }
+            }
+
+            // Verify builds inside AssemblyCompiler if LLM is provided (Self-Healing Loop)
+            if (_llmProvider != null && workspace.ContainsKey(backendAppDbContextPath))
+            {
+                onLog?.Invoke("[AssemblyEngine] Validating compiler safety check (Phase 3 self-healing validation)...");
+                // Check if DbContext parses successfully using Roslyn
+                var csharpVerificationTree = CSharpSyntaxTree.ParseText(Encoding.UTF8.GetString(workspace[backendAppDbContextPath]));
+                var diagnostics = csharpVerificationTree.GetDiagnostics();
+                if (diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
+                {
+                    onLog?.Invoke("[AssemblyEngine] AST Diagnostics error detected. Triggering AI self-healing recovery loop...");
+                    var offendingCode = Encoding.UTF8.GetString(workspace[backendAppDbContextPath]);
+                    var errorLogs = string.Join("\n", diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.GetMessage()));
+                    var healedCode = await _llmProvider.StitchFileAsync(offendingCode, "Fix code errors: " + errorLogs, "DbContext syntax recovery");
+                    workspace[backendAppDbContextPath] = Encoding.UTF8.GetBytes(healedCode);
                 }
             }
 
