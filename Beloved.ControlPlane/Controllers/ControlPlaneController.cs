@@ -25,18 +25,18 @@ public class ControlPlaneController : ControllerBase
     private readonly IVaultRepository _vaultRepository;
     private readonly AssemblyCompiler _compiler;
     private readonly ILlmProvider _llmProvider;
-    private readonly IAssemblyQueue _queue;
+    private readonly MassTransit.IPublishEndpoint _publishEndpoint;
     private readonly IOutputStore _outputStore;
     private readonly SandboxOrchestrator _sandboxOrchestrator;
     private readonly BelovedDbContext _db;
 
-    public ControlPlaneController(IWebHostEnvironment env, IVaultRepository vaultRepository, AssemblyCompiler compiler, ILlmProvider llmProvider, IAssemblyQueue queue, IOutputStore outputStore, SandboxOrchestrator sandboxOrchestrator, BelovedDbContext db)
+    public ControlPlaneController(IWebHostEnvironment env, IVaultRepository vaultRepository, AssemblyCompiler compiler, ILlmProvider llmProvider, MassTransit.IPublishEndpoint publishEndpoint, IOutputStore outputStore, SandboxOrchestrator sandboxOrchestrator, BelovedDbContext db)
     {
         _env = env;
         _vaultRepository = vaultRepository;
         _compiler = compiler;
         _llmProvider = llmProvider;
-        _queue = queue;
+        _publishEndpoint = publishEndpoint;
         _outputStore = outputStore;
         _sandboxOrchestrator = sandboxOrchestrator;
         _db = db;
@@ -308,8 +308,8 @@ public class ControlPlaneController : ControllerBase
             dbContext.AssemblyJobs.Add(jobEntity);
             await dbContext.SaveChangesAsync();
 
-            var job = new Beloved.ControlPlane.Services.AssemblyJob(queueJobId, blueprint);
-            await _queue.QueueJobAsync(job);
+            // Publish job message directly to MassTransit distributed queue
+            await _publishEndpoint.Publish(new AssemblyJobMessage(queueJobId, blueprint));
 
             return Accepted(new { JobId = queueJobId, DatabaseJobId = jobEntity.Id, Message = "Assembly queued successfully." });
         }

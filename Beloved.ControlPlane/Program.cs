@@ -111,25 +111,35 @@ builder.Services.AddTransient<IVaultRepository>(sp =>
     return new CachedVaultRepository(inner, cache);
 });
 
-// Add SignalR
-builder.Services.AddSignalR();
+// Add SignalR with Redis Backplane if configured
+var signalRBuilder = builder.Services.AddSignalR();
+var redisConn = builder.Configuration["Redis:ConnectionString"];
+if (!string.IsNullOrEmpty(redisConn))
+{
+    signalRBuilder.AddStackExchangeRedis(redisConn);
+}
 
 // Register Queue and Worker
-builder.Services.AddSingleton<IAssemblyQueue, Beloved.ControlPlane.Services.AssemblyQueue>();
 builder.Services.AddSingleton<IOutputStore, Beloved.ControlPlane.Services.LocalDiskOutputStore>();
 builder.Services.AddSingleton<Beloved.ControlPlane.Services.SandboxOrchestrator>();
-builder.Services.AddHostedService<Beloved.ControlPlane.Services.AssemblyWorker>();
 builder.Services.AddHostedService<Beloved.ControlPlane.Services.EmailBackgroundProcessor>();
 
 // MassTransit & RabbitMQ Setup
 builder.Services.AddMassTransit(x =>
 {
+    x.AddConsumer<AssemblyJobConsumer>();
+
     x.UsingRabbitMq((context, cfg) =>
     {
         cfg.Host(builder.Configuration["RabbitMQ:Host"] ?? "localhost", "/", h =>
         {
             h.Username("guest");
             h.Password("guest");
+        });
+
+        cfg.ReceiveEndpoint("assembly-jobs", e =>
+        {
+            e.ConfigureConsumer<AssemblyJobConsumer>(context);
         });
     });
 });
