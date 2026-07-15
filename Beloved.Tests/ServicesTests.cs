@@ -1067,6 +1067,7 @@ public class OciVaultRepositoryTests
         var repo = new OciVaultRepository(client, verifierMock.Object, logger);
 
         // Fetching a module (must verify signature, unlike templates)
+        OciVaultRepository.AllowSignatureBypassForLocalhost = false;
         await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
         {
             await repo.FetchModuleInMemoryAsync("auth", "latest");
@@ -1347,6 +1348,7 @@ public class LlmProviderTests
         // Mutate public key path to non-existent file
         var originalPath = OciVaultRepository.PublicKeyPemPath;
         OciVaultRepository.PublicKeyPemPath = "/nonexistent/cosign-key.pub";
+        OciVaultRepository.AllowSignatureBypassForLocalhost = false;
 
         try
         {
@@ -1954,6 +1956,7 @@ public class LlmProviderTests
         var logger = loggerFactory.CreateLogger<OciVaultRepository>();
         var repo = new OciVaultRepository(client, verifierMock.Object, logger);
 
+        OciVaultRepository.AllowSignatureBypassForLocalhost = false;
         await Assert.ThrowsAsync<System.Security.SecurityException>(async () =>
         {
             await repo.FetchModuleInMemoryAsync("auth", "latest");
