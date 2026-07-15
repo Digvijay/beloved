@@ -29,4 +29,23 @@ jobs:
       run: dotnet build Beloved.ControlPlane.sln --no-restore -c Release
 
     - name: Run Unit Tests
-      run: dotnet test Beloved.ControlPlane.sln --no-build -c Release --verbosity normal
+      run: dotnet test Beloved.ControlPlane.sln --no-build -c Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+    - name: Parse Test Count and Update Badge
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+      run: |
+        # Extract total passed test count from trx XML file
+        PASSED_COUNT=$(grep -oE 'passed="[0-9]+"' Beloved.Tests/TestResults/test-results.trx | head -1 | grep -oE '[0-9]+')
+        if [ -z "$PASSED_COUNT" ]; then
+          PASSED_COUNT="0"
+        fi
+        echo "Found $PASSED_COUNT passing tests."
+        
+        # Replace the badges section with the updated test count
+        sed -i -E "s/tests-[0-9]+%20passing-brightgreen/tests-${PASSED_COUNT}%20passing-brightgreen/g" README.md
+
+        # Commit and push changes back
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add README.md
+        git diff --quiet && git diff --staged --quiet || (git commit -m "docs: dynamic update test badge to $PASSED_COUNT passing tests" && git push origin HEAD:${{ github.ref }})
