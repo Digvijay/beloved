@@ -38,3 +38,19 @@ A `browser_subagent` was spun up to navigate the application:
    - Clicked through the tabs to confirm visual excellence and responsive rendering.
    
 All servers were shut down cleanly after successful E2E validation.
+
+## 6. Distributed Scaling & Innovation Verification
+Following the Kubernetes KEDA scaling enhancements, we ran the following validations:
+
+1. **Distributed MassTransit Pipeline**:
+   - Replaced local singleton queues with a MassTransit RabbitMQ topology.
+   - Pushed jobs via CLI and verified consumption by `AssemblyJobConsumer`.
+   - Verified log streaming over SignalR.
+
+2. **WebAssembly dynamic runtime (Wasmtime)**:
+   - Added unit test validation confirming the plugin runner interface fails closed gracefully under invalid bytecode contexts.
+
+3. **Kubernetes Validating Admission Webhook**:
+   - Tested controller review payloads to verify that unsigned OCI images (`beloved/unsigned`) are denied entry, while signed components are successfully admitted.
+
+All **83 tests passed successfully** during test suite verification.
