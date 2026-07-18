@@ -2601,6 +2601,43 @@ public class LlmProviderTests
         Assert.False(result);
     }
 
+    [Fact]
+    public async Task WasmtimeExecutor_InvalidModule_ThrowsException()
+    {
+        var executor = new WasmtimeExecutor();
+        // Passing invalid empty WASM bytecode should throw an exception gracefully (fail closed)
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await executor.ExecuteAsync(new byte[] { 1, 2, 3 }, "nonexistent_fn");
+        });
+    }
+
+    [Fact]
+    public async Task AdmissionWebhookController_AllowedAndDeniedImages()
+    {
+        var repoMock = new Mock<IVaultRepository>();
+        var logger = TestHelpers.NullLogger<Beloved.ControlPlane.Controllers.AdmissionWebhookController>();
+        var controller = new Beloved.ControlPlane.Controllers.AdmissionWebhookController(repoMock.Object, logger);
+
+        // Test Allowed Case
+        var allowedJson = "{\"request\": {\"object\": {\"spec\": {\"containers\": [{\"image\": \"beloved/auth:latest\"}]}}}}";
+        using var allowedDoc = System.Text.Json.JsonDocument.Parse(allowedJson);
+        var allowedRes = await controller.ValidateAdmission(allowedDoc.RootElement) as Microsoft.AspNetCore.Mvc.OkObjectResult;
+        Assert.NotNull(allowedRes);
+        var allowedSer = System.Text.Json.JsonSerializer.Serialize(allowedRes.Value);
+        using var allowedValDoc = System.Text.Json.JsonDocument.Parse(allowedSer);
+        Assert.True(allowedValDoc.RootElement.GetProperty("response").GetProperty("allowed").GetBoolean());
+
+        // Test Denied Case
+        var deniedJson = "{\"request\": {\"object\": {\"spec\": {\"containers\": [{\"image\": \"beloved/unsigned:latest\"}]}}}}";
+        using var deniedDoc = System.Text.Json.JsonDocument.Parse(deniedJson);
+        var deniedRes = await controller.ValidateAdmission(deniedDoc.RootElement) as Microsoft.AspNetCore.Mvc.OkObjectResult;
+        Assert.NotNull(deniedRes);
+        var deniedSer = System.Text.Json.JsonSerializer.Serialize(deniedRes.Value);
+        using var deniedValDoc = System.Text.Json.JsonDocument.Parse(deniedSer);
+        Assert.False(deniedValDoc.RootElement.GetProperty("response").GetProperty("allowed").GetBoolean());
+    }
+
     private LocalVaultRepository BuildRealLocalRepository()
     {
         var cwd = Directory.GetCurrentDirectory();

@@ -123,6 +123,10 @@ if (!string.IsNullOrEmpty(redisConn))
 builder.Services.AddSingleton<IOutputStore, Beloved.ControlPlane.Services.LocalDiskOutputStore>();
 builder.Services.AddSingleton<Beloved.ControlPlane.Services.SandboxOrchestrator>();
 builder.Services.AddHostedService<Beloved.ControlPlane.Services.EmailBackgroundProcessor>();
+builder.Services.AddHostedService<Beloved.ControlPlane.Services.TelemetryObserverWorker>();
+
+// Register Wasmtime Executor
+builder.Services.AddTransient<IWasmExecutor, WasmtimeExecutor>();
 
 // MassTransit & RabbitMQ Setup
 builder.Services.AddMassTransit(x =>
