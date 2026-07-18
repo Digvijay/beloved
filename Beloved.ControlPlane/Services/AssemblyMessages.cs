@@ -13,3 +13,8 @@ public record IntentMappingMessage(
     string Prompt,
     string ConnectionId
 );
+
+public record OptimizeAssemblyMessage(
+    string TargetModule,
+    string Reason
+);

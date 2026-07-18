@@ -13,6 +13,9 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Net.Http;
+using Microsoft.Extensions.DependencyInjection;
+using MassTransit;
 using Xunit;
 
 namespace Beloved.Tests;
@@ -2615,9 +2618,9 @@ public class LlmProviderTests
     [Fact]
     public async Task AdmissionWebhookController_AllowedAndDeniedImages()
     {
-        var repoMock = new Mock<IVaultRepository>();
+        var repository = BuildRealLocalRepository();
         var logger = TestHelpers.NullLogger<Beloved.ControlPlane.Controllers.AdmissionWebhookController>();
-        var controller = new Beloved.ControlPlane.Controllers.AdmissionWebhookController(repoMock.Object, logger);
+        var controller = new Beloved.ControlPlane.Controllers.AdmissionWebhookController(repository, logger);
 
         // Test Allowed Case
         var allowedJson = "{\"request\": {\"object\": {\"spec\": {\"containers\": [{\"image\": \"beloved/auth:latest\"}]}}}}";
@@ -2636,6 +2639,64 @@ public class LlmProviderTests
         var deniedSer = System.Text.Json.JsonSerializer.Serialize(deniedRes.Value);
         using var deniedValDoc = System.Text.Json.JsonDocument.Parse(deniedSer);
         Assert.False(deniedValDoc.RootElement.GetProperty("response").GetProperty("allowed").GetBoolean());
+    }
+
+    // Concrete test wrapper to inject latency and test without mocking
+    private class TestTelemetryObserverWorker : TelemetryObserverWorker
+    {
+        private readonly double _latency;
+        public TestTelemetryObserverWorker(IServiceProvider sp, IHttpClientFactory clientFactory, ILogger<TelemetryObserverWorker> logger, double latency)
+            : base(sp, clientFactory, logger)
+        {
+            _latency = latency;
+        }
+
+        protected override Task<double> GetAverageAssemblyLatencyAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(_latency);
+        }
+    }
+
+    [Fact]
+    public async Task TelemetryObserverWorker_UnderLoad_TriggersAssemblyOptimization()
+    {
+        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        services.AddMassTransitTestHarness(x => { });
+        services.AddHttpClient();
+        services.AddLogging();
+
+        var sp = services.BuildServiceProvider();
+        var harness = sp.GetRequiredService<MassTransit.Testing.ITestHarness>();
+        await harness.Start();
+
+        var logger = TestHelpers.NullLogger<TelemetryObserverWorker>();
+        var clientFactory = sp.GetRequiredService<IHttpClientFactory>();
+        var worker = new TestTelemetryObserverWorker(sp, clientFactory, logger, 1250.0);
+
+        using var cts = new CancellationTokenSource();
+        var task = worker.StartAsync(cts.Token);
+        
+        await Task.Delay(200); // Allow execution loop step
+        cts.Cancel();
+        await task;
+
+        // Verify the message was published to the actual in-memory broker harness
+        Assert.True(await harness.Published.Any<OptimizeAssemblyMessage>());
+    }
+
+    [Fact]
+    public async Task WasmtimeExecutor_ValidHeaderModule_ThrowsMissingFunction()
+    {
+        var executor = new WasmtimeExecutor();
+        // Valid WASM MVP binary header bytes
+        var mvpWasmBytes = new byte[] { 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 };
+        
+        // Assert that loading succeeded but threw Function not found as expected (fails closed securely)
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await executor.ExecuteAsync(mvpWasmBytes, "missing_function");
+        });
+        Assert.Contains("Function missing_function not found", exception.Message);
     }
 
     private LocalVaultRepository BuildRealLocalRepository()
