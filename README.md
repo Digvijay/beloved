@@ -5,7 +5,7 @@
 ### *You built something Lovable. Now make it Beloved.*
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Digvijay/beloved/ci.yaml?branch=master&style=flat-square&label=CI&logo=github-actions&logoColor=white)](https://github.com/Digvijay/beloved/actions/workflows/ci.yaml)
-[![Tests](https://img.shields.io/badge/tests-83%20passing-brightgreen?style=flat-square&logo=xunit&logoColor=white)](https://github.com/Digvijay/beloved/actions)
+[![Tests](https://img.shields.io/badge/tests-85%20passing-brightgreen?style=flat-square&logo=xunit&logoColor=white)](https://github.com/Digvijay/beloved/actions)
 [![.NET](https://img.shields.io/badge/.NET-9.0-512BD4?style=flat-square&logo=dotnet&logoColor=white)](https://dot.net)
 [![React](https://img.shields.io/badge/React-TypeScript-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
 [![OCI](https://img.shields.io/badge/Registry-OCI_Compliant-0db7ed?style=flat-square&logo=docker&logoColor=white)](https://opencontainers.org)
