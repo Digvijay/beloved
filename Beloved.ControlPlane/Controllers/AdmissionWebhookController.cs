@@ -37,13 +37,20 @@ public class AdmissionWebhookController : ControllerBase
                 var image = container.GetProperty("image").GetString();
                 if (image != null && image.StartsWith("beloved/"))
                 {
-                    // Verify the container image signature against our Cosign keys
-                    _logger.LogInformation("Verifying signature for image: {Image}", image);
-                    
-                    // In production, pulls the image manifest and signature and runs ISignatureVerifier.
-                    // For mock test coverage:
-                    if (image.Contains("unsigned"))
+                    try
                     {
+                        var parts = image.Split('/');
+                        var imageTarget = parts[^1];
+                        var imageParts = imageTarget.Split(':');
+                        var moduleName = imageParts[0];
+                        var tag = imageParts.Length > 1 ? imageParts[1] : "latest";
+
+                        // Cryptographically verify OCI manifest signature via repository fetch (fails-closed on exception)
+                        await _vaultRepository.FetchModuleInMemoryAsync(moduleName, tag);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Validation failed for image {Image}", image);
                         return Ok(new
                         {
                             apiVersion = "admission.k8s.io/v1",
@@ -51,7 +58,7 @@ public class AdmissionWebhookController : ControllerBase
                             response = new
                             {
                                 allowed = false,
-                                status = new { message = "Untrusted container signature. Denied." }
+                                status = new { message = $"Untrusted container validation failed: {ex.Message}" }
                             }
                         });
                     }
