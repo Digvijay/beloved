@@ -43,9 +43,6 @@ namespace Beloved.Tests
                 });
 
                 // 2. Prevent background workers from trying to run or calling external APIs during testing
-                var assemblyWorker = services.SingleOrDefault(d => d.ImplementationType == typeof(AssemblyWorker));
-                if (assemblyWorker != null) services.Remove(assemblyWorker);
-
                 var emailProcessor = services.SingleOrDefault(d => d.ImplementationType == typeof(EmailBackgroundProcessor));
                 if (emailProcessor != null) services.Remove(emailProcessor);
 

@@ -258,6 +258,48 @@ namespace Beloved.AssemblyEngine
             return (files, digest);
         }
 
+        public async Task<bool> VerifySignatureAsync(string moduleName, string version)
+        {
+            try
+            {
+                var repository = $"modules/{moduleName.ToLower()}";
+                var manifestUrl = $"/v2/{repository}/manifests/{version}";
+                var response = await SendWithRetryAsync(async () =>
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Get, manifestUrl);
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.oci.image.manifest.v1+json"));
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.docker.distribution.manifest.v2+json"));
+                    return await _httpClient.SendAsync(request);
+                });
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return false;
+                }
+
+                var manifestContent = await response.Content.ReadAsStringAsync();
+                
+                string? digest = null;
+                if (response.Content.Headers.TryGetValues("Docker-Content-Digest", out var values))
+                {
+                    digest = string.Join("", values);
+                }
+                if (string.IsNullOrEmpty(digest)) digest = version;
+
+                var isVerified = await VerifyManifestSignatureAsync(repository, digest, manifestContent);
+                if (!isVerified && version != digest)
+                {
+                    isVerified = await VerifyManifestSignatureAsync(repository, version, manifestContent);
+                }
+                return isVerified;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Lightweight OCI signature verification failed.");
+                return false;
+            }
+        }
+
         private async Task<bool> VerifyManifestSignatureAsync(string repository, string tag, string manifestPayload)
         {
             // For local development on localhost registries, signature checks can be bypassed or mock verified.

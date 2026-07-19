@@ -11,5 +11,6 @@ namespace Beloved.AssemblyEngine
         Task<(Dictionary<string, byte[]> files, string digest)> FetchModuleInMemoryAsync(string moduleName, string version);
         Task PushModuleAsync(string modulePath, string moduleName, string version);
         Task<IEnumerable<string>> ListModulesAsync();
+        Task<bool> VerifySignatureAsync(string moduleName, string version);
     }
 }

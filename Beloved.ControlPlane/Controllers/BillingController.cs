@@ -19,7 +19,7 @@ namespace Beloved.ControlPlane.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/billing")]
-public sealed class BillingController : ControllerBase
+public class BillingController : ControllerBase
 {
     private readonly BelovedDbContext _db;
     private readonly IConfiguration _config;
@@ -160,7 +160,7 @@ public sealed class BillingController : ControllerBase
         Event stripeEvent;
         try
         {
-            stripeEvent = EventUtility.ConstructEvent(payload, sigHeader, WebhookSecret);
+            stripeEvent = ParseStripeEvent(payload, sigHeader);
         }
         catch (StripeException ex)
         {
@@ -234,5 +234,10 @@ public sealed class BillingController : ControllerBase
         var apiKey = Request.Headers["X-Api-Key"].ToString();
         if (string.IsNullOrWhiteSpace(apiKey)) return null;
         return await _db.Tenants.FirstOrDefaultAsync(t => t.ApiKey == apiKey);
+    }
+
+    protected virtual Event ParseStripeEvent(string payload, string sigHeader)
+    {
+        return EventUtility.ConstructEvent(payload, sigHeader, WebhookSecret);
     }
 }

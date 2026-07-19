@@ -89,7 +89,7 @@ public class AssemblyCompiler
         _llmProvider = llmProvider;
     }
 
-    public async Task<AssemblyResult> AssembleAsync(string blueprintJson, string jobId, IOutputStore outputStore, Action<string>? onLog = null)
+    public virtual async Task<AssemblyResult> AssembleAsync(string blueprintJson, string jobId, IOutputStore outputStore, Action<string>? onLog = null)
     {
         using var activity = CompilerActivitySource.StartActivity("AssembleApp");
         activity?.SetTag("job.id", jobId);

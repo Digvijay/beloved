@@ -37,20 +37,17 @@ public class AdmissionWebhookController : ControllerBase
                 var image = container.GetProperty("image").GetString();
                 if (image != null && image.StartsWith("beloved/"))
                 {
-                    try
-                    {
-                        var parts = image.Split('/');
-                        var imageTarget = parts[^1];
-                        var imageParts = imageTarget.Split(':');
-                        var moduleName = imageParts[0];
-                        var tag = imageParts.Length > 1 ? imageParts[1] : "latest";
+                    var parts = image.Split('/');
+                    var imageTarget = parts[^1];
+                    var imageParts = imageTarget.Split(':');
+                    var moduleName = imageParts[0];
+                    var tag = imageParts.Length > 1 ? imageParts[1] : "latest";
 
-                        // Cryptographically verify OCI manifest signature via repository fetch (fails-closed on exception)
-                        await _vaultRepository.FetchModuleInMemoryAsync(moduleName, tag);
-                    }
-                    catch (Exception ex)
+                    // Call lightweight signature verification (fails-closed on false)
+                    var isValid = await _vaultRepository.VerifySignatureAsync(moduleName, tag);
+                    if (!isValid)
                     {
-                        _logger.LogError(ex, "Validation failed for image {Image}", image);
+                        _logger.LogWarning("Untrusted container signature rejected: {Image}", image);
                         return Ok(new
                         {
                             apiVersion = "admission.k8s.io/v1",
@@ -58,7 +55,7 @@ public class AdmissionWebhookController : ControllerBase
                             response = new
                             {
                                 allowed = false,
-                                status = new { message = $"Untrusted container validation failed: {ex.Message}" }
+                                status = new { message = "Untrusted container signature. Denied." }
                             }
                         });
                     }

@@ -73,12 +73,12 @@ public class TelemetryObserverWorker : BackgroundService
                 if (line.StartsWith("beloved_assembly_duration_seconds_sum"))
                 {
                     var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length > 1) double.TryParse(parts[1], out sum);
+                    if (parts.Length > 1) double.TryParse(parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out sum);
                 }
                 else if (line.StartsWith("beloved_assembly_duration_seconds_count"))
                 {
                     var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length > 1) double.TryParse(parts[1], out count);
+                    if (parts.Length > 1) double.TryParse(parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out count);
                 }
             }
             

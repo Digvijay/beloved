@@ -101,6 +101,12 @@ public sealed class CachedVaultRepository : IVaultRepository
         return _inner.ListModulesAsync();
     }
 
+    public Task<bool> VerifySignatureAsync(string moduleName, string version)
+    {
+        // Delegate to inner repository for validation checking
+        return _inner.VerifySignatureAsync(moduleName, version);
+    }
+
     private static void CopyDirectory(string sourceDir, string destinationDir)
     {
         var dir = new DirectoryInfo(sourceDir);

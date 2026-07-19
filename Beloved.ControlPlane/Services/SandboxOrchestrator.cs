@@ -18,7 +18,7 @@ public class SandboxOrchestrator
         _outputStore = outputStore;
     }
 
-    public async Task<(bool success, string error, string url)> StartSandboxAsync(string jobId)
+    public virtual async Task<(bool success, string error, string url)> StartSandboxAsync(string jobId)
     {
         if (_activeTempWorkspace != null)
         {
@@ -103,7 +103,7 @@ services:
         return (true, "", "http://localhost:3001");
     }
 
-    public async Task<bool> StopSandboxAsync()
+    public virtual async Task<bool> StopSandboxAsync()
     {
         if (string.IsNullOrEmpty(_activeTempWorkspace)) return true;
 

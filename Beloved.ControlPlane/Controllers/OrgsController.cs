@@ -21,6 +21,7 @@ namespace Beloved.ControlPlane.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/orgs")]
+[Microsoft.AspNetCore.Authorization.Authorize(AuthenticationSchemes = "JwtBearer")]
 public sealed class OrgsController : ControllerBase
 {
     private readonly BelovedDbContext _db;

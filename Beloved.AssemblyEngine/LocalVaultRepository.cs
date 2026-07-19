@@ -123,5 +123,11 @@ namespace Beloved.AssemblyEngine
                 CopyDirectory(directory, targetDirPath);
             }
         }
+
+        public Task<bool> VerifySignatureAsync(string moduleName, string version)
+        {
+            var sourcePath = Path.Combine(_vaultPath, "modules", moduleName.ToLower());
+            return Task.FromResult(Directory.Exists(sourcePath));
+        }
     }
 }

@@ -2616,6 +2616,63 @@ public class LlmProviderTests
     }
 
     [Fact]
+    public async Task WasmtimeExecutor_ValidModule_ExecutesSuccessfully()
+    {
+        var executor = new WasmtimeExecutor();
+
+        // Minimal WASM module exporting "run" returning i32 const 42
+        var runWasmBytes = new byte[]
+        {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // Magic + Version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,       // Type section (i32 result)
+            0x03, 0x02, 0x01, 0x00,                         // Function section
+            0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, // Export "run"
+            0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2a, 0x0b  // Code section (const 42)
+        };
+
+        var result = await executor.ExecuteAsync(runWasmBytes, "run");
+        Assert.Equal("42", result);
+
+        // Test missing function within valid module
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await executor.ExecuteAsync(runWasmBytes, "missing_function");
+        });
+    }
+
+    [Fact]
+    public async Task WasmtimeExecutor_WithParameters_MapsArgumentsCorrectly()
+    {
+        var executor = new WasmtimeExecutor();
+
+        // Minimal WASM module exporting "echo" (param i32) (result i32)
+        var echoWasmBytes = new byte[]
+        {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+            0x03, 0x02, 0x01, 0x00,
+            0x07, 0x08, 0x01, 0x04, 0x65, 0x63, 0x68, 0x6f, 0x00, 0x00,
+            0x0a, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b
+        };
+
+        // 1. Map int parameter successfully
+        var resultInt = await executor.ExecuteAsync(echoWasmBytes, "echo", 999);
+        Assert.Equal("999", resultInt);
+
+        // 2. Map string parameter (will fail type check but covers the string-mapping block and catch handler)
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await executor.ExecuteAsync(echoWasmBytes, "echo", "some-string");
+        });
+
+        // 3. Map default object parameter
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await executor.ExecuteAsync(echoWasmBytes, "echo", new object());
+        });
+    }
+
+    [Fact]
     public async Task AdmissionWebhookController_AllowedAndDeniedImages()
     {
         var repository = BuildRealLocalRepository();
@@ -2641,19 +2698,76 @@ public class LlmProviderTests
         Assert.False(deniedValDoc.RootElement.GetProperty("response").GetProperty("allowed").GetBoolean());
     }
 
-    // Concrete test wrapper to inject latency and test without mocking
+    // Concrete fake HTTP handler and factory to test Prometheus parsing without mocking libraries
+    private class FakeHttpMessageHandler : HttpMessageHandler
+    {
+        private readonly string _response;
+        public FakeHttpMessageHandler(string response) => _response = response;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new HttpResponseMessage
+            {
+                StatusCode = System.Net.HttpStatusCode.OK,
+                Content = new StringContent(_response)
+            });
+        }
+    }
+
+    private class FakeHttpClientFactory : IHttpClientFactory
+    {
+        private readonly HttpClient _client;
+        public FakeHttpClientFactory(HttpClient client) => _client = client;
+        public HttpClient CreateClient(string name) => _client;
+    }
+
+    [Fact]
+    public async Task TelemetryObserverWorker_ParsesPrometheusMetricsCorrectly()
+    {
+        var metricsPayload = "beloved_assembly_duration_seconds_sum 15.0\n" +
+                             "beloved_assembly_duration_seconds_count 10\n";
+        
+        using var handler = new FakeHttpMessageHandler(metricsPayload);
+        using var client = new HttpClient(handler);
+        var factory = new FakeHttpClientFactory(client);
+
+        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        var sp = services.BuildServiceProvider();
+        var logger = TestHelpers.NullLogger<TelemetryObserverWorker>();
+
+        // Instantiate concrete worker
+        var worker = new TelemetryObserverWorker(sp, factory, logger);
+
+        // Access the protected parsing method via a subclass to execute the real parsing block
+        var testWorker = new TestTelemetryObserverWorker(sp, factory, logger, 0.0);
+        
+        // This triggers the actual scraping loop parsing logic
+        var latency = await testWorker.ExposeGetAverageAssemblyLatencyAsync(CancellationToken.None);
+        
+        // (15.0 sum / 10 count) * 1000ms = 1500ms
+        Assert.Equal(1500.0, latency);
+    }
+
     private class TestTelemetryObserverWorker : TelemetryObserverWorker
     {
-        private readonly double _latency;
-        public TestTelemetryObserverWorker(IServiceProvider sp, IHttpClientFactory clientFactory, ILogger<TelemetryObserverWorker> logger, double latency)
+        private readonly double? _overrideLatency;
+        public TestTelemetryObserverWorker(IServiceProvider sp, IHttpClientFactory clientFactory, ILogger<TelemetryObserverWorker> logger, double? overrideLatency)
             : base(sp, clientFactory, logger)
         {
-            _latency = latency;
+            _overrideLatency = overrideLatency;
         }
 
         protected override Task<double> GetAverageAssemblyLatencyAsync(CancellationToken cancellationToken)
         {
-            return Task.FromResult(_latency);
+            if (_overrideLatency.HasValue && _overrideLatency.Value > 0.0)
+            {
+                return Task.FromResult(_overrideLatency.Value);
+            }
+            return base.GetAverageAssemblyLatencyAsync(cancellationToken);
+        }
+
+        public Task<double> ExposeGetAverageAssemblyLatencyAsync(CancellationToken token)
+        {
+            return base.GetAverageAssemblyLatencyAsync(token);
         }
     }
 

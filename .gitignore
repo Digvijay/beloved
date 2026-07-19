@@ -54,3 +54,6 @@ dist/
 # Python cache
 __pycache__/
 *.pyc
+
+# Test execution artifacts
+[Tt]est[Rr]esults/
