@@ -1,0 +1,76 @@
+name: Publish Beloved CLI NuGet Tool
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write  # enable GitHub OIDC token issuance for Trusted Publishing
+
+jobs:
+  verify-and-test:
+    name: Build & Verify Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK 9.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore Beloved.ControlPlane.sln
+
+      - name: Build Solution
+        run: dotnet build Beloved.ControlPlane.sln --no-restore -c Release
+
+      - name: Run Full Test Suite (128 Tests)
+        run: dotnet test Beloved.ControlPlane.sln --no-build -c Release --verbosity normal
+
+  publish-tool:
+    name: Pack & Publish NuGet Tool
+    needs: verify-and-test
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      NUGET_USER: ${{ secrets.NUGET_USER }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK 9.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore Beloved.Cli/Beloved.Cli.csproj
+
+      - name: Build & Pack CLI Tool (.nupkg)
+        run: |
+          dotnet pack Beloved.Cli/Beloved.Cli.csproj -c Release --no-restore -o ./nupkg
+
+      - name: Push to GitHub Packages
+        run: |
+          dotnet nuget push ./nupkg/*.nupkg \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --skip-duplicate
+
+      - name: NuGet login (OIDC Trusted Publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER || 'digvijay' }}
+
+      - name: Push to NuGet.org via Trusted Publishing
+        run: |
+          dotnet nuget push ./nupkg/*.nupkg --source "https://api.nuget.org/v3/index.json" --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --skip-duplicate

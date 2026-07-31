@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "beloved.fullname" . }}-assembly-worker
+  labels:
+    {{- include "beloved.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "beloved.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: assembly-worker
+  template:
+    metadata:
+      labels:
+        {{- include "beloved.labels" . | nindent 8 }}
+        app.kubernetes.io/component: assembly-worker
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["dotnet", "Beloved.ControlPlane.dll", "--worker-only"]
+          env:
+            - name: DatabaseProvider
+              value: "PostgreSQL"
+            - name: ConnectionStrings__PostgresDb
+              value: "Host={{ .Release.Name }}-postgresql;Database={{ .Values.postgresql.auth.database }};Username=postgres;Password={{ .Values.postgresql.auth.postgresPassword }}"
+            - name: RabbitMQ__Host
+              value: "{{ .Release.Name }}-rabbitmq"
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+{{- if .Values.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "beloved.fullname" . }}-assembly-worker-scaler
+  labels:
+    {{- include "beloved.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "beloved.fullname" . }}-assembly-worker
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  cooldownPeriod: 300
+  pollingInterval: 30
+  triggers:
+    - type: rabbitmq
+      metadata:
+        queueName: beloved-assembly-jobs
+        queueLength: "{{ .Values.keda.queueLengthThreshold }}"
+        host: amqp://{{ .Values.rabbitmq.auth.username }}:{{ .Values.rabbitmq.auth.password }}@{{ .Release.Name }}-rabbitmq:5672/
+{{- end }}

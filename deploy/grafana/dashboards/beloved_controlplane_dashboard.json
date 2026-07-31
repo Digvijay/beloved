@@ -1,0 +1,85 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "title": "Assembly Execution Latency (P50 / P90 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "P50 Latency (sec)"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(http_server_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "P90 Latency (sec)"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "P99 Latency (sec)"
+        }
+      ]
+    },
+    {
+      "title": "Assembly Throughput (Success vs Failure Rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(beloved_assemblies_completed_total[1m])",
+          "legendFormat": "Completed Assemblies/sec"
+        },
+        {
+          "expr": "rate(beloved_assemblies_failed_total[1m])",
+          "legendFormat": "Failed Assemblies/sec"
+        }
+      ]
+    },
+    {
+      "title": "Two-Tier Vault Cache Hit Ratio (%)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(beloved_cache_hits_total[5m])) / (sum(rate(beloved_cache_hits_total[5m])) + sum(rate(beloved_cache_misses_total[5m]))) * 100",
+          "legendFormat": "Cache Hit %"
+        }
+      ]
+    },
+    {
+      "title": "Active Kestrel TCP Connections",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        {
+          "expr": "kestrel_active_connections",
+          "legendFormat": "Active Connections"
+        }
+      ]
+    },
+    {
+      "title": "Roslyn Security Analyzer Rejections",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(beloved_security_rejections_total)",
+          "legendFormat": "Rejections"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["beloved", "telemetry", "controlplane", "observability"],
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "Beloved Enterprise Control Plane Observability Dashboard",
+  "uid": "beloved-enterprise-telemetry-v2"
+}

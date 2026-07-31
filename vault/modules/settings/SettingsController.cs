@@ -1,0 +1,1 @@
+using System;using Microsoft.AspNetCore.Mvc;namespace BelovedApp.Controllers;[ApiController][Route("api/settings")]public class SettingsController:ControllerBase{[HttpGet]public IActionResult Get(){return Ok();}}public class SettingConfig{public Guid Id{get;set;}=Guid.NewGuid();}

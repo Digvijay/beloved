@@ -1,0 +1,79 @@
+@Host = http://localhost:3000
+@ApiKey = beloved_live_key_production_001
+@JobId = job-sample-001
+
+### 1. Health Checks
+GET {{Host}}/healthz/live
+Accept: application/json
+
+###
+GET {{Host}}/healthz/ready
+Accept: application/json
+
+### 2. OpenTelemetry Prometheus Metrics
+GET {{Host}}/metrics
+Accept: text/plain
+
+### 3. Authentication & Tenant Token Exchange
+# @name register
+POST {{Host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "developer@example.com",
+  "organization": "Enterprise Dev Team"
+}
+
+###
+# @name token
+POST {{Host}}/api/auth/token
+Content-Type: application/json
+
+{
+  "apiKey": "{{ApiKey}}"
+}
+
+### 4. OCI Module Catalog
+GET {{Host}}/api/modules/catalog
+X-Api-Key: {{ApiKey}}
+Accept: application/json
+
+### 5. Submit Application Assembly Job
+POST {{Host}}/api/assemble
+Content-Type: application/json
+X-Api-Key: {{ApiKey}}
+
+{
+  "prompt": "Build a SaaS dashboard with auth, billing, and analytics",
+  "target": "desktop",
+  "modules": ["auth", "billing", "analytics"]
+}
+
+### 6. Query Job Status & SBOM
+GET {{Host}}/api/assemble/{{JobId}}/status
+X-Api-Key: {{ApiKey}}
+Accept: application/json
+
+###
+GET {{Host}}/api/assemble/{{JobId}}/sbom
+X-Api-Key: {{ApiKey}}
+Accept: application/json
+
+### 7. Kubernetes Admission Controller Validation
+POST {{Host}}/api/k8s/validate
+Content-Type: application/json
+
+{
+  "request": {
+    "uid": "705ab4f5-6393-11e8-b7cc-42010a800002",
+    "kind": { "group": "", "version": "v1", "kind": "Pod" },
+    "object": {
+      "metadata": { "name": "beloved-pod" },
+      "spec": {
+        "containers": [
+          { "name": "app", "image": "beloved/controlplane:0.1.0" }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    
+    <!-- Configure as a .NET Tool -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>beloved</ToolCommandName>
+    <PackageOutputPath>../nupkg</PackageOutputPath>
+    <Version>0.1.0</Version>
+    <Authors>Digvijay Chauhan</Authors>
+    <Company>Beloved</Company>
+    <Description>Beloved CLI Tool - Deterministic AI-Assisted Application Assembly Platform</Description>
+    <PackageProjectUrl>https://github.com/Digvijay/beloved</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Digvijay/beloved</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\docs\icon.png" Pack="true" PackagePath="\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    <PackageReference Include="Spectre.Console" Version="0.49.1" />
+    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <ProjectReference Include="..\Beloved.AssemblyEngine\Beloved.AssemblyEngine.csproj" />
+  </ItemGroup>
+
+</Project>

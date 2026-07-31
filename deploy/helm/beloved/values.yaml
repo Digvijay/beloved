@@ -1,0 +1,44 @@
+replicaCount: 3
+
+image:
+  repository: beloved/controlplane
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: beloved.dev
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: beloved-tls
+      hosts:
+        - beloved.dev
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 75
+
+prometheus:
+  metricsPath: /metrics
+  serviceMonitor:
+    enabled: true

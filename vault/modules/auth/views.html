@@ -1,0 +1,41 @@
+<section id="view-login" class="view-section active">
+    <div style="max-width: 480px; margin: 2rem auto;" class="card">
+        <h2 style="margin-bottom: 1.5rem; text-align: center;"><i class="fa-solid fa-lock" style="color: var(--accent-primary); margin-right: 0.5rem;"></i> Sign In</h2>
+        <form id="auth-login-form">
+            <div class="form-group">
+                <label for="login-username">Username</label>
+                <input type="text" id="login-username" class="form-control" placeholder="Enter username" required>
+            </div>
+            <div class="form-group">
+                <label for="login-password">Password</label>
+                <input type="password" id="login-password" class="form-control" placeholder="Enter password" required>
+            </div>
+            <div id="login-error" style="color: var(--error); font-size: 0.9rem; margin-bottom: 1rem; display: none;"></div>
+            <button type="submit" class="btn btn-primary" style="width: 100%;">Sign In</button>
+        </form>
+        <p style="margin-top: 1.5rem; text-align: center; font-size: 0.9rem; opacity: 0.8;">
+            Don't have an account? <a href="#register" onclick="app.navigate('register')" style="color: var(--accent-secondary); text-decoration: none;">Register here</a>
+        </p>
+    </div>
+</section>
+
+<section id="view-register" class="view-section">
+    <div style="max-width: 480px; margin: 2rem auto;" class="card">
+        <h2 style="margin-bottom: 1.5rem; text-align: center;"><i class="fa-solid fa-user-plus" style="color: var(--accent-secondary); margin-right: 0.5rem;"></i> Create Account</h2>
+        <form id="auth-register-form">
+            <div class="form-group">
+                <label for="register-username">Username</label>
+                <input type="text" id="register-username" class="form-control" placeholder="Choose username" required>
+            </div>
+            <div class="form-group">
+                <label for="register-password">Password</label>
+                <input type="password" id="register-password" class="form-control" placeholder="Choose password" required>
+            </div>
+            <div id="register-error" style="color: var(--error); font-size: 0.9rem; margin-bottom: 1rem; display: none;"></div>
+            <button type="submit" class="btn btn-primary" style="width: 100%;">Sign Up</button>
+        </form>
+        <p style="margin-top: 1.5rem; text-align: center; font-size: 0.9rem; opacity: 0.8;">
+            Already have an account? <a href="#login" onclick="app.navigate('login')" style="color: var(--accent-secondary); text-decoration: none;">Login here</a>
+        </p>
+    </div>
+</section>

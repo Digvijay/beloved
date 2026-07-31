@@ -1,0 +1,1 @@
+using System;using Microsoft.AspNetCore.Mvc;namespace BelovedApp.Controllers;[ApiController][Route("api/storage")]public class StorageController:ControllerBase{[HttpPost("upload")]public IActionResult Upload(){return Ok(new { url="/mock-url.png" });}}public class BlobRecord{public Guid Id{get;set;}=Guid.NewGuid();}

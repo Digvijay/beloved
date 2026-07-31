@@ -1,0 +1,1 @@
+{"Name":"Analytics","Description":"Adds tracking and charts","Frontend":{"Nav":"{/* analytics nav */}","Views":"analytics-view.tsx"},"Backend":{"Controllers":["AnalyticsController.cs"]}}

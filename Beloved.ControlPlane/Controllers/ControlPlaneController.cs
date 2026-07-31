@@ -1,0 +1,278 @@
+using System;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Beloved.AssemblyEngine;
+using Beloved.ControlPlane.Services;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
+
+using System.Security.Claims;
+using Microsoft.EntityFrameworkCore;
+using Beloved.ControlPlane.Data;
+using Beloved.ControlPlane.Models;
+using Microsoft.AspNetCore.Authorization;
+
+namespace Beloved.ControlPlane.Controllers;
+
+[ApiController]
+[Route("api")]
+public class ControlPlaneController : ControllerBase
+{
+    private readonly IWebHostEnvironment _env;
+    private readonly IVaultRepository _vaultRepository;
+    private readonly AssemblyCompiler _compiler;
+    private readonly ILlmProvider _llmProvider;
+    private readonly MassTransit.IPublishEndpoint _publishEndpoint;
+    private readonly IOutputStore _outputStore;
+    private readonly SandboxOrchestrator _sandboxOrchestrator;
+    private readonly BelovedDbContext _db;
+    private readonly IModuleVerificationService? _verificationService;
+
+    public ControlPlaneController(IWebHostEnvironment env, IVaultRepository vaultRepository, AssemblyCompiler compiler, ILlmProvider llmProvider, MassTransit.IPublishEndpoint publishEndpoint, IOutputStore outputStore, SandboxOrchestrator sandboxOrchestrator, BelovedDbContext db, IModuleVerificationService? verificationService = null)
+    {
+        _env = env;
+        _vaultRepository = vaultRepository;
+        _compiler = compiler;
+        _llmProvider = llmProvider;
+        _publishEndpoint = publishEndpoint;
+        _outputStore = outputStore;
+        _sandboxOrchestrator = sandboxOrchestrator;
+        _db = db;
+        _verificationService = verificationService;
+    }
+
+
+    [HttpGet("jobs/{jobId}/sbom")]
+    [Authorize]
+    public async Task<IActionResult> GetJobSbom(string jobId)
+    {
+        var tenantIdStr = HttpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(tenantIdStr, out var tenantId)) return Unauthorized();
+
+        var job = await _db.AssemblyJobs.Include(j => j.Project).FirstOrDefaultAsync(j => j.QueueJobId == jobId && j.Project != null && j.Project.TenantId == tenantId);
+        if (job == null) return NotFound("Job not found or access denied.");
+        if (string.IsNullOrEmpty(job.SbomJson)) return NotFound("SBOM not available for this job.");
+
+        return Content(job.SbomJson, "application/json");
+    }
+
+    // ── Webhook Management ─────────────────────────────────────────────────
+
+    public class RegisterWebhookRequest
+    {
+        public string Url { get; set; } = string.Empty;
+        public string Events { get; set; } = string.Empty; // comma-separated, empty = all
+        public string Secret { get; set; } = string.Empty;
+    }
+
+    [HttpPost("webhooks")]
+    [Authorize]
+    public async Task<IActionResult> RegisterWebhook([FromBody] RegisterWebhookRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Url)) return BadRequest("Url is required.");
+        if (!Uri.TryCreate(request.Url, UriKind.Absolute, out _)) return BadRequest("Url must be a valid absolute URI.");
+
+        var tenantIdStr = HttpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(tenantIdStr, out var tenantId)) return Unauthorized();
+
+        var webhook = new Models.Webhook
+        {
+            TenantId = tenantId,
+            Url = request.Url,
+            Events = request.Events,
+            Secret = request.Secret
+        };
+        _db.Webhooks.Add(webhook);
+        await _db.SaveChangesAsync();
+
+        return Ok(new { webhook.Id, webhook.Url, webhook.Events, webhook.IsActive, webhook.CreatedAt });
+    }
+
+    [HttpGet("webhooks")]
+    [Authorize]
+    public async Task<IActionResult> ListWebhooks()
+    {
+        var tenantIdStr = HttpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(tenantIdStr, out var tenantId)) return Unauthorized();
+
+        var webhooks = await _db.Webhooks
+            .Where(w => w.TenantId == tenantId)
+            .Select(w => new { w.Id, w.Url, w.Events, w.IsActive, w.CreatedAt })
+            .ToListAsync();
+
+        return Ok(webhooks);
+    }
+
+    [HttpDelete("webhooks/{webhookId:guid}")]
+    [Authorize]
+    public async Task<IActionResult> DeleteWebhook(Guid webhookId)
+    {
+        var tenantIdStr = HttpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(tenantIdStr, out var tenantId)) return Unauthorized();
+
+        var webhook = await _db.Webhooks.FirstOrDefaultAsync(w => w.Id == webhookId && w.TenantId == tenantId);
+        if (webhook == null) return NotFound();
+
+        _db.Webhooks.Remove(webhook);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+
+    public class IntentRequest
+    {
+        public string Prompt { get; set; } = string.Empty;
+    }
+
+    [HttpPost("intent")]
+    public async Task<IActionResult> MapIntent([FromBody] IntentRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Prompt)) return BadRequest("Prompt is required");
+
+        // 1. Get available modules from vault
+        var modules = await _vaultRepository.ListModulesAsync();
+
+        // 2. Ask the IntentMapper (LLM) to map it to a Blueprint
+        try
+        {
+            var blueprint = await _llmProvider.MapIntentAsync(request.Prompt, modules);
+            if (blueprint == null) return StatusCode(500, "Failed to generate blueprint");
+            return Ok(blueprint);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
+
+    public class RefineBlueprintRequest
+    {
+        public Blueprint CurrentBlueprint { get; set; } = null!;
+        public string RefinePrompt { get; set; } = string.Empty;
+    }
+
+    [HttpPost("blueprints/refine")]
+    public async Task<IActionResult> RefineBlueprint([FromBody] RefineBlueprintRequest request)
+    {
+        if (request.CurrentBlueprint == null) return BadRequest("CurrentBlueprint is required");
+        if (string.IsNullOrWhiteSpace(request.RefinePrompt)) return BadRequest("RefinePrompt is required");
+
+        var modules = await _vaultRepository.ListModulesAsync();
+
+        try
+        {
+            var updatedBlueprint = await _llmProvider.RefineBlueprintAsync(request.CurrentBlueprint, request.RefinePrompt, modules);
+            if (updatedBlueprint == null) return StatusCode(500, "Failed to refine blueprint");
+            return Ok(updatedBlueprint);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
+
+    public class AssembleRequest
+    {
+        public required string ProjectId { get; set; }
+        public required JsonElement Blueprint { get; set; }
+    }
+
+    [HttpPost("assemble")]
+    [Authorize]
+    public async Task<IActionResult> Assemble([FromBody] AssembleRequest request, [FromServices] Beloved.ControlPlane.Data.BelovedDbContext dbContext)
+    {
+        try
+        {
+            var blueprintStr = request.Blueprint.GetRawText();
+            var blueprint = JsonSerializer.Deserialize(blueprintStr, AssemblyJsonContext.Default.Blueprint);
+            if (blueprint == null) return BadRequest("Invalid blueprint");
+
+            if (!Guid.TryParse(request.ProjectId, out var projectId)) return BadRequest("ProjectId must be a valid GUID.");
+            var tenantIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId)) return Unauthorized();
+
+            // Ensure project belongs to tenant
+            var project = await dbContext.Projects.FirstOrDefaultAsync(p => p.Id == projectId && p.TenantId == tenantId);
+            if (project == null) return NotFound("Project not found.");
+
+            var queueJobId = Guid.NewGuid().ToString("N");
+            
+            var jobEntity = new Beloved.ControlPlane.Models.AssemblyJob
+            {
+                ProjectId = projectId,
+                QueueJobId = queueJobId,
+                Status = "Queued",
+                BlueprintJson = blueprintStr
+            };
+            
+            dbContext.AssemblyJobs.Add(jobEntity);
+            await dbContext.SaveChangesAsync();
+
+            // Publish job message directly to MassTransit distributed queue
+            await _publishEndpoint.Publish(new AssemblyJobMessage(queueJobId, blueprint));
+
+            return Accepted(new { JobId = queueJobId, DatabaseJobId = jobEntity.Id, Message = "Assembly queued successfully." });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
+
+    [HttpGet("artifacts/{jobId}")]
+    public async Task<IActionResult> DownloadArtifact(string jobId)
+    {
+        try
+        {
+            var stream = await _outputStore.GetArtifactAsync(jobId);
+            if (stream == null) return NotFound("Artifact not found or expired.");
+
+            return File(stream, "application/zip", $"{jobId}.zip");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
+
+    public class PreviewRequest
+    {
+        public string JobId { get; set; } = string.Empty;
+    }
+
+    [HttpPost("preview/start")]
+    public async Task<IActionResult> StartPreview([FromBody] PreviewRequest request)
+    {
+        try
+        {
+            var result = await _sandboxOrchestrator.StartSandboxAsync(request.JobId);
+            if (result.success)
+            {
+                return Ok(new { message = "Preview started", url = result.url });
+            }
+            return StatusCode(500, new { error = result.error });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("preview/stop")]
+    public async Task<IActionResult> StopPreview()
+    {
+        try
+        {
+            await _sandboxOrchestrator.StopSandboxAsync();
+            return Ok(new { message = "Preview stopped" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+}

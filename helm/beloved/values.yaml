@@ -1,0 +1,33 @@
+# Default values for beloved.
+replicaCount: 1
+
+image:
+  repository: beloved/control-plane
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 3000
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "postgrespassword"
+    database: "beloved"
+
+rabbitmq:
+  enabled: true
+  auth:
+    username: "guest"
+    password: "guest"
+
+secrets:
+  stripeSecretKey: "sk_test_placeholder"
+  jwtSecret: "beloved-dev-secret-REPLACE-IN-PRODUCTION-min-32-chars"
+
+keda:
+  enabled: true
+  minReplicas: 0
+  maxReplicas: 50
+  queueLengthThreshold: 5

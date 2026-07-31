@@ -1,0 +1,21 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "beloved.fullname" . }}-keda-scaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: beloved
+spec:
+  scaleTargetRef:
+    name: {{ include "beloved.fullname" . }}
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 30
+  pollingInterval: 5
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://beloved-prometheus.beloved-system.svc.cluster.local:9090
+        metricName: beloved_assembly_jobs_active
+        query: sum(beloved_assembly_jobs_pending)
+        threshold: '2'
